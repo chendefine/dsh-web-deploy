@@ -88,6 +88,15 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 COPY dsh-run.sh /usr/local/bin/dsh-run.sh
 RUN chmod +x /usr/local/bin/dsh-run.sh
 
+# ---------------------------------------------------------------------------
+# 8. git safe.directory 烧进系统配置(/etc/gitconfig), 构建期写定、运行期不再
+#    追加: 挂载的检出(/app/dsh)与工作区(/data/workspace)属宿主机用户, git 判
+#    "dubious ownership" 会拒绝操作。系统级对容器内所有用户生效(dsh、root 的
+#    docker exec 会话);
+# ---------------------------------------------------------------------------
+RUN git config --system --add safe.directory /app/dsh \
+  && git config --system --add safe.directory /data/workspace
+
 # nginx 代理 SPA + API; dsh web 或 nginx 任一不响应即失败(容器转 unhealthy)。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD curl -fsS http://127.0.0.1:80/ >/dev/null || exit 1

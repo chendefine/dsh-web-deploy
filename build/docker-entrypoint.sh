@@ -50,8 +50,9 @@ for p in node_modules apps/web/dist/index.html; do
 done
 
 # --- 非特权 'dsh web' 启动器 -----------------------------------------
-# 以 DSH_UID:DSH_GID、HOME=/data/workspace 运行; 先为该用户配 git
-# safe.directory(宿主机属主的检出/工作区, "dubious ownership")。脚本 COPY 在
+# 以 DSH_UID:DSH_GID、HOME=/data/workspace 运行。git safe.directory(宿主机
+# 属主的检出/工作区, "dubious ownership")已烧进镜像 /etc/gitconfig
+# (Dockerfile.runtime 步骤 8), 启动器不再写用户级配置。脚本 COPY 在
 # /usr/local/bin/dsh-run.sh(与 Dockerfile.builder 的 dsh-build.sh 同模式),
 # 不要在这里重新生成。
 echo "[entrypoint] dsh web -> http://127.0.0.1:3080  (DSH_HOME=${DSH_HOME}, user ${DSH_UID}:${DSH_GID})"
