@@ -102,7 +102,7 @@ DSH_DOMAIN=dsh.localhost
 | ------------------------- | ------------------------------------------------------------------------ |
 | 启动 / 收敛当前模式       | `task up`                                                                |
 | 停止全部容器（保留数据）  | `task down`                                                              |
-| 重启当前模式栈            | `task restart`                                                           |
+| 重启（强制重建）当前模式栈 | `task restart`                                                           |
 | 查看容器状态              | `task ps`                                                                |
 | 跟踪日志                  | `task logs`，或分块 `task dsh:logs` / `auth:logs` / `tls:logs`           |
 | 升级版本                  | `task update`                                                            |
@@ -120,7 +120,7 @@ task up
 
 `task up` 是收敛操作：它会移除与新模式冲突的 HTTP 入口持有者（例如从认证切回单实例时移除 gateway，或反向移除仍带端口的旧 runtime 容器），并按模式重建 dsh/auth 块。切换期间 TLS 若在运行会自动 reload 以刷新 `dsh-http-entry` 解析，允许短暂 502，不会出现认证绕过。
 
-注意：`task restart` 不会应用端口/别名等配置变更，切换模式请一律使用 `task up`。
+注意：`task restart` 以 `up -d --force-recreate` 强制重建所选容器，因此会应用端口/别名等 Compose 配置；但它不做入口冲突清理，切换模式请一律使用 `task up`。
 
 ### 升级版本
 
@@ -156,7 +156,7 @@ task user:list                              # 查看用户列表
 | `task ps`                                     | 显示所有 profile 中的容器                                                                                                                                                            |
 | `task logs`                                   | 跟踪当前完整模式日志                                                                                                                                                                 |
 | `task dsh:logs` / `auth:logs` / `tls:logs`    | 跟踪指定块日志                                                                                                                                                                       |
-| `task restart`                                | 重启两个开关选中的完整栈：dsh 实例 + `AUTH_GATEWAY=true` 时的 auth 块 + `HTTPS_EXPORT=true` 时的 tls 块；未创建的块自动跳过（模式切换请用 `task up`，restart 不会应用端口/别名变化） |
+| `task restart`                                | 以 `up -d --force-recreate` 重建两个开关选中的完整栈：dsh 实例 + `AUTH_GATEWAY=true` 时的 auth 块 + `HTTPS_EXPORT=true` 时的 tls 块；未创建的所选块会被直接创建（模式切换仍请用 `task up`，restart 不清理与新模式冲突的旧容器） |
 | `task shell`                                  | 无认证模式默认进入第一个实例；认证模式使用 `task shell -- user`                                                                                                                      |
 | `task hash -- '口令'`                         | 生成 Authelia argon2id 密码摘要                                                                                                                                                      |
 | `task user:create -- <name> <密码>`           | 创建用户：同步 Authelia 用户库/ACL、compose 实例、gateway 路由并创建数据目录                                                                                                         |
@@ -171,15 +171,15 @@ task user:list                              # 查看用户列表
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `task dsh:up`       | 启动选中的 dsh 块：`AUTH_GATEWAY=false` 只启动第一个实例并直接发布 `HTTP_PORT`；`true` 启动全部实例（无宿主机端口）。可指定单个用户：`task dsh:up -- user1 [--force-recreate 等 compose 参数]` |
 | `task dsh:down`     | 删除全部 dsh 实例及旧版遗留容器；保留宿主机数据。可指定单个用户：`task dsh:down -- user1` 只删除该实例（同时跳过遗留容器清理）                                                                 |
-| `task dsh:restart`  | 重启选中的 dsh 实例（`AUTH_GATEWAY=false` 只重启第一个实例）。可指定单个用户：`task dsh:restart -- user1`                                                                                      |
+| `task dsh:restart`  | 以 `up -d --force-recreate` 重建选中的 dsh 实例（`AUTH_GATEWAY=false` 只重建第一个实例，其余实例不动）。可指定单个用户：`task dsh:restart -- user1`                                                                            |
 | `task auth:up`      | 启动 Authelia/gateway，`HTTP_PORT` 直接发布在 gateway；要求 `AUTH_GATEWAY=true`                                                                                                                |
 | `task auth:down`    | 删除 Authelia、gateway；保留认证数据                                                                                                                                                           |
-| `task auth:restart` | 重启 Authelia/gateway；要求 `AUTH_GATEWAY=true`（会使 Authelia 内存会话失效，用户需重新登录）                                                                                                  |
+| `task auth:restart` | 以 `up -d --force-recreate` 重建 Authelia/gateway；要求 `AUTH_GATEWAY=true`（会使 Authelia 内存会话失效，用户需重新登录）                                                                      |
 | `task tls:up`       | 启动内置 TLS；**不受 `HTTPS_EXPORT` 限制**，随时可用                                                                                                                                           |
 | `task tls:down`     | 删除内置 TLS 容器；保留证书                                                                                                                                                                    |
-| `task tls:restart`  | 重启内置 TLS 容器；**不受 `HTTPS_EXPORT` 限制**，随时可用                                                                                                                                      |
+| `task tls:restart`  | 以 `up -d --force-recreate` 重建内置 TLS 容器；**不受 `HTTPS_EXPORT` 限制**，随时可用                                                                                                            |
 
-块级命令互相独立。若只启动下游块，上游缺失时看到 502 属于预期；上游出现后自动恢复。`restart` 系列只重启已存在的容器（未创建的块静默跳过，不新增也不删除容器），且不会应用端口/别名等配置变更——切换模式请用 `task up`。
+块级命令互相独立。若只启动下游块，上游缺失时看到 502 属于预期；上游出现后自动恢复。`restart` 系列以 `up -d --force-recreate` 强制重建所选容器（容器按当前 Compose 模型重建，端口/别名等配置会一并应用；未创建的所选容器会被直接创建），但从不删除所选范围之外的容器，也不做入口冲突清理——切换模式请用 `task up`。
 
 ### 单用户定向操作
 
@@ -189,7 +189,7 @@ task user:list                              # 查看用户列表
 task dsh:up -- user1                  # 只启动 user1 的实例
 task dsh:up -- user1 --force-recreate # 名字后可继续跟 compose up 参数
 task dsh:down -- user1                # 只停止并删除 user1 的实例
-task dsh:restart -- user1             # 只重启 user1 的实例
+task dsh:restart -- user1             # 只强制重建 user1 的实例
 ```
 
 - 名字可用裸用户名或服务名（`user1` 与 `dsh-user1` 等价，与 `task shell -- user1` 一致）；首个以 `-` 开头的词视为 compose 参数而非用户名；
@@ -449,7 +449,7 @@ runtime 网络同时承载 `dsh-http-entry` 别名解析：HTTP 入口服务与 
 
 - 先运行 `task config:validate`，确认输出的 mode、开关、`primary`、`http_entry` 与端口。
 - `AUTH_GATEWAY`、`HTTPS_EXPORT` 只接受大小写不敏感的 `true` 或 `false`；其他值会失败。
-- 切换模式后使用 `task up` 收敛；`task restart` 不会应用端口/别名变化。
+- 切换模式后使用 `task up` 收敛；`task restart` 虽会按当前模型重建所选容器，但不清理与新模式冲突的旧容器（例如仍持有 `HTTP_PORT` 的旧入口），不能替代 `task up`。
 - 彻底停止全部块使用 `task down`，不是只执行某个块的 down。
 
 ### 登录和跳转

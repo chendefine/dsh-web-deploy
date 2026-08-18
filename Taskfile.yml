@@ -22,7 +22,12 @@ dotenv: ['.env']
 # never stops or removes an existing tls container, and explicit tls:up always works.
 # The aggregate `restart` follows the same switch selection as `up` (dsh always, auth/tls
 # only when selected); explicit auth:restart requires AUTH_GATEWAY=true while tls:restart,
-# like tls:up/tls:down, is always available. Restart never applies port/alias changes.
+# like tls:up/tls:down, is always available. Every restart task recreates its services with
+# "up -d --force-recreate" (plain "docker compose restart" reuses the old container and
+# neither re-runs the entrypoint cleanly nor re-applies the model), so a recreated
+# container gets the current Compose model including the mode overlay's port/alias.
+# Restart never removes a container outside the selected blocks; switching the selection
+# itself still requires task up (restart does not run the entry-conflict cleanup).
 #
 # dsh:up/down/restart accept an optional per-user target after "--" (plain or dsh- prefixed
 # instance name, resolved and validated by scripts/compose_mode.sh target-service): they
@@ -304,15 +309,19 @@ tasks:
       - task: _tls:refresh
 
   # Restart helpers for the aggregate `restart` task. They follow the same switch
-  # discipline as the reconcile tasks: a disabled block is skipped, a selected block
-  # whose containers were never created is a silent no-op (docker compose restart
-  # tolerates missing containers), and no container is ever created or removed.
+  # discipline as the reconcile tasks (a disabled block is skipped) but recreate the
+  # selected services with "up -d --force-recreate": plain "docker compose restart"
+  # reuses the old container instead of recreating it. MODE_COMPOSE is mandatory here —
+  # recreation rebuilds from the Compose model, which must include the mode overlay
+  # (published HTTP_PORT + dsh-http-entry alias), or the recreated entry container would
+  # come back without its published port. A selected block whose containers were never
+  # created is created by `up`; no container outside the selected block is ever removed.
   _auth:restart:
     internal: true
     cmds:
       - |-
         if [ '{{.AUTH_ENABLED}}' = true ]; then
-          {{.COMPOSE}} --profile auth restart authelia gateway
+          {{.MODE_COMPOSE}} --profile auth up -d --no-deps --force-recreate authelia gateway
         fi
 
   _tls:restart:
@@ -320,7 +329,7 @@ tasks:
     cmds:
       - |-
         if [ '{{.HTTPS_ENABLED}}' = true ]; then
-          {{.COMPOSE}} --profile tls restart tls
+          {{.MODE_COMPOSE}} --profile tls up -d --no-deps --force-recreate tls
         fi
 
   # ----------------------------------------------------------------------- block tasks
@@ -367,20 +376,24 @@ tasks:
         fi
 
   dsh:restart:
-    desc: Restart the selected dsh instances, or one user's (task dsh:restart -- <name>)
+    desc: Recreate the selected dsh instances, or one user's (task dsh:restart -- <name>)
     vars:
       TARGET_SERVICE:
         sh: sh '{{.MODE_HELPER}}' target-service '{{.CLI_ARGS}}'
       TARGET_ARGS:
         sh: sh '{{.MODE_HELPER}}' target-args '{{.CLI_ARGS}}'
     cmds:
+      # Recreate via "up -d --force-recreate" ("docker compose restart" reuses the old
+      # container). MODE_COMPOSE is required: in no-auth mode the primary is recreated
+      # from the Compose model, which must carry the overlay's published HTTP_PORT and
+      # dsh-http-entry alias or the instance would come back unreachable.
       - |-
         if [ -n '{{.TARGET_SERVICE}}' ]; then
-          {{.COMPOSE}} --profile dsh restart {{.TARGET_ARGS}} '{{.TARGET_SERVICE}}'
+          {{.MODE_COMPOSE}} --profile dsh up -d --no-deps --force-recreate {{.TARGET_ARGS}} '{{.TARGET_SERVICE}}'
         elif [ '{{.AUTH_ENABLED}}' = true ]; then
-          {{.COMPOSE}} --profile dsh restart
+          {{.MODE_COMPOSE}} --profile dsh up -d --no-deps --force-recreate {{.DSH_SERVICE_ARGS}}
         else
-          {{.COMPOSE}} --profile dsh restart '{{.PRIMARY_SERVICE}}'
+          {{.MODE_COMPOSE}} --profile dsh up -d --no-deps --force-recreate '{{.PRIMARY_SERVICE}}'
         fi
 
   dsh:logs:
@@ -406,12 +419,13 @@ tasks:
       - '{{.COMPOSE}} --profile auth rm -sf'
 
   auth:restart:
-    desc: Restart Authelia and the authentication gateway (requires AUTH_GATEWAY=true)
+    desc: Recreate Authelia and the authentication gateway (requires AUTH_GATEWAY=true)
     preconditions:
       - sh: test '{{.AUTH_ENABLED}}' = true
         msg: 'AUTH_GATEWAY=false; set AUTH_GATEWAY=true before task auth:restart'
     cmds:
-      - '{{.COMPOSE}} --profile auth restart authelia gateway'
+      # MODE_COMPOSE: recreation must keep the overlay's published HTTP_PORT on gateway.
+      - '{{.MODE_COMPOSE}} --profile auth up -d --no-deps --force-recreate authelia gateway'
 
   auth:logs:
     desc: Follow authentication block logs
@@ -432,9 +446,9 @@ tasks:
       - '{{.COMPOSE}} --profile tls rm -sf'
 
   tls:restart:
-    desc: Restart the built-in HTTPS export (always available, independent of HTTPS_EXPORT)
+    desc: Recreate the built-in HTTPS export (always available, independent of HTTPS_EXPORT)
     cmds:
-      - '{{.COMPOSE}} --profile tls restart tls'
+      - '{{.MODE_COMPOSE}} --profile tls up -d --no-deps --force-recreate tls'
 
   tls:logs:
     desc: Follow built-in TLS logs
@@ -495,7 +509,7 @@ tasks:
       - '{{.COMPOSE}} {{.ALL_PROFILES}} down --remove-orphans'
 
   restart:
-    desc: Restart the complete selected stack (dsh + auth/tls per AUTH_GATEWAY/HTTPS_EXPORT)
+    desc: Recreate the complete selected stack via up --force-recreate (dsh + auth/tls per AUTH_GATEWAY/HTTPS_EXPORT)
     cmds:
       # CLI_ARGS is pinned so the aggregate task always restarts every selected
       # block even when invoked with arguments (per-user targeting is dsh:restart-only).
