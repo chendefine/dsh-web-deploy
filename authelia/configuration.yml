@@ -1,0 +1,61 @@
+# =============================================================================
+# Authelia 4.39 认证配置模板。
+# 仅在 AUTH_GATEWAY=true 时启用；gateway 将门户挂载到 /authelia/。
+# compose 注入 DSH_DOMAIN 与 HTTPS_PORT，并通过 template filter 渲染本文件。
+#
+# Authelia 4.39 的浏览器登录 URL 必须是 HTTPS，且会话 cookie 为 Secure：
+# 认证模式下 HTTP_PORT 始终发布在 gateway 上，但它是给外部 TLS 终结器使用的明文
+# upstream（以及探活/冒烟），浏览器必须访问 HTTPS_PORT 对应的 HTTPS 地址完成登录。
+# HTTPS_PORT 描述浏览器侧公开 HTTPS 端口，非 443 时会写入门户与回跳 URL。
+# =============================================================================
+
+{{- $ext_port := env "HTTPS_PORT" -}}
+{{- $port_suffix := "" -}}
+{{- if and $ext_port (ne $ext_port "443") -}}{{- $port_suffix = printf ":%s" $ext_port -}}{{- end }}
+
+server:
+  address: tcp://0.0.0.0:9091/authelia
+
+log:
+  level: info
+
+storage:
+  # 演示密钥；正式部署请更换（openssl rand -hex 16）。更换后旧数据库不可解密。
+  encryption_key: 1ff04c778497ee01ac93774ab954f372
+  local:
+    path: /config/db.sqlite3
+
+session:
+  cookies:
+    - domain: {{ env "DSH_DOMAIN" }}
+      authelia_url: https://{{ env "DSH_DOMAIN" }}{{ $port_suffix }}/authelia/
+      default_redirection_url: https://{{ env "DSH_DOMAIN" }}{{ $port_suffix }}/
+      same_site: lax
+      expiration: 1d
+      inactivity: 12h
+      remember_me: 30d
+
+identity_validation:
+  reset_password:
+    # 演示密钥；正式部署请更换（openssl rand -hex 16）。
+    jwt_secret: 98e1c3df437e105e2e0ee2c0af56db8a
+
+authentication_backend:
+  password_reset:
+    disable: true
+  file:
+    path: /config/users_database.yml
+
+# 默认拒绝，仅允许明确列出的用户。增加多用户实例时，还需同步用户库、gateway
+# 路由映射与 compose 中的 dsh runtime 实例；完整步骤见 README「用户管理」。
+access_control:
+  default_policy: deny
+  rules:
+    - domain: {{ env "DSH_DOMAIN" }}
+      policy: one_factor
+      subject:
+        - "user:user"
+
+notifier:
+  filesystem:
+    filename: /config/notification.txt

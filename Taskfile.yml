@@ -1,0 +1,641 @@
+version: '3'
+
+# Deployment switches resolve exclusively from .env (Task dotenv). A missing .env
+# falls back to defaults; shell exports can neither reach the template context nor
+# survive the forced env prefixes on every docker invocation below, so
+# "AUTH_GATEWAY=true task up" style overrides are inert by design.
+dotenv: ['.env']
+
+# DeepSeek Harness container deployment task runner.
+#
+# Runtime blocks:
+#   dsh   - real *dsh-runtime services (profile dsh); AUTH_GATEWAY=false starts only the
+#           first declared instance, AUTH_GATEWAY=true starts all of them
+#   auth  - authelia + gateway (profile auth)
+#   tls   - built-in HTTPS terminator (profile tls)
+#
+# HTTP is always exported. scripts/compose_mode.sh overlays HTTP_PORT:80 and the
+# dsh-http-entry network alias directly onto the selected entry service:
+#   AUTH_GATEWAY=false -> first declared runtime instance
+#   AUTH_GATEWAY=true  -> gateway
+# HTTPS_EXPORT only decides whether the stack tasks start the tls block automatically; it
+# never stops or removes an existing tls container, and explicit tls:up always works.
+# The aggregate `restart` follows the same switch selection as `up` (dsh always, auth/tls
+# only when selected); explicit auth:restart requires AUTH_GATEWAY=true while tls:restart,
+# like tls:up/tls:down, is always available. Restart never applies port/alias changes.
+#
+# dsh:up/down/restart accept an optional per-user target after "--" (plain or dsh- prefixed
+# instance name, resolved and validated by scripts/compose_mode.sh target-service): they
+# then start/stop/restart only that user's dsh instance and never touch other users'
+# containers. Remaining words stay Compose flags ("task dsh:up -- user --force-recreate");
+# with no target the tasks keep their mode-selected block behavior.
+
+vars:
+  REPO_DIR: '{{.ROOT_DIR}}/deepseek-harness'
+  DSH_REPO_URL: '{{ default "https://github.com/deepseek-ai/deepseek-harness.git" .DSH_REPO_URL }}'
+  STORE_DIR: '{{.REPO_DIR}}/.pnpm-store'
+  BUILDX_DIR: '{{.ROOT_DIR}}/.buildx'
+  MODE_HELPER: '{{.ROOT_DIR}}/scripts/compose_mode.sh'
+
+  # Strict, normalized deployment switches. dotenv values are case-insensitive but only
+  # true and false are accepted; all other spellings fail before Docker is invoked.
+  AUTH_ENABLED:
+    sh: |-
+      value='{{ default "false" .AUTH_GATEWAY }}'
+      value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      case "$value" in
+        true|false) printf '%s\n' "$value" ;;
+        *) echo "error: AUTH_GATEWAY must be true or false (got '$value')" >&2; exit 2 ;;
+      esac
+  HTTPS_ENABLED:
+    sh: |-
+      value='{{ default "true" .HTTPS_EXPORT }}'
+      value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      case "$value" in
+        true|false) printf '%s\n' "$value" ;;
+        *) echo "error: HTTPS_EXPORT must be true or false (got '$value')" >&2; exit 2 ;;
+      esac
+
+  HTTP_PORT_VALUE:
+    sh: |-
+      value='{{ coalesce .HTTP_PORT .GATEWAY_PORT "3080" }}'
+      case "$value" in ''|*[!0-9]*) echo "error: HTTP_PORT must be an integer (got '$value')" >&2; exit 2;; esac
+      if [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
+        echo "error: HTTP_PORT must be between 1 and 65535 (got '$value')" >&2; exit 2
+      fi
+      printf '%s\n' "$value"
+  HTTPS_PORT_VALUE:
+    sh: |-
+      value='{{ default "443" .HTTPS_PORT }}'
+      case "$value" in ''|*[!0-9]*) echo "error: HTTPS_PORT must be an integer (got '$value')" >&2; exit 2;; esac
+      if [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
+        echo "error: HTTPS_PORT must be between 1 and 65535 (got '$value')" >&2; exit 2
+      fi
+      printf '%s\n' "$value"
+  HOST_UID_VALUE:
+    sh: |-
+      value='{{ default "1000" .HOST_UID }}'
+      case "$value" in *[!0-9]*) echo "error: HOST_UID must be a positive integer (got '$value')" >&2; exit 2;; esac
+      if [ "$value" -lt 1 ] || [ "$value" -gt 2147483647 ]; then
+        echo "error: HOST_UID must be between 1 and 2147483647 (got '$value')" >&2; exit 2
+      fi
+      printf '%s\n' "$value"
+  HOST_GID_VALUE:
+    sh: |-
+      value='{{ default "1000" .HOST_GID }}'
+      case "$value" in *[!0-9]*) echo "error: HOST_GID must be a positive integer (got '$value')" >&2; exit 2;; esac
+      if [ "$value" -lt 1 ] || [ "$value" -gt 2147483647 ]; then
+        echo "error: HOST_GID must be between 1 and 2147483647 (got '$value')" >&2; exit 2
+      fi
+      printf '%s\n' "$value"
+
+  # Real runtime services in compose.yaml declaration order. The first entry is the
+  # no-auth instance; YAML declaration order of *dsh-runtime services is contractual.
+  DSH_SERVICES:
+    sh: sh '{{.MODE_HELPER}}' services
+  # Space-separated form for embedding service lists in single shell command lines.
+  DSH_SERVICE_ARGS:
+    sh: sh '{{.MODE_HELPER}}' services | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+  PRIMARY_SERVICE:
+    sh: sh '{{.MODE_HELPER}}' primary
+  OTHER_DSH_SERVICES:
+    sh: sh '{{.MODE_HELPER}}' services | tail -n +2 | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+  HTTP_ENTRY:
+    sh: |-
+      if [ '{{.AUTH_ENABLED}}' = true ]; then echo gateway;
+      else sh '{{.MODE_HELPER}}' primary; fi
+
+  MODE:
+    sh: |-
+      case '{{.AUTH_ENABLED}}/{{.HTTPS_ENABLED}}' in
+        false/false) echo single ;;
+        false/true)  echo single+tls ;;
+        true/false)  echo auth ;;
+        true/true)   echo auth+tls ;;
+      esac
+
+  # Plain Compose model for commands that must not change service topology.
+  # Clearing COMPOSE_PROFILES prevents a caller's exported value from silently changing a
+  # public task's service set.
+  COMPOSE: >-
+    COMPOSE_PROFILES=
+    HTTP_PORT={{.HTTP_PORT_VALUE}}
+    HTTPS_PORT={{.HTTPS_PORT_VALUE}}
+    HOST_UID={{.HOST_UID_VALUE}}
+    HOST_GID={{.HOST_GID_VALUE}}
+    docker compose
+  # Environment prefix shared by every mode-aware helper invocation.
+  MODE_ENV: >-
+    COMPOSE_PROFILES=
+    AUTH_GATEWAY={{.AUTH_ENABLED}}
+    HTTP_PORT={{.HTTP_PORT_VALUE}}
+    HTTPS_PORT={{.HTTPS_PORT_VALUE}}
+    HOST_UID={{.HOST_UID_VALUE}}
+    HOST_GID={{.HOST_GID_VALUE}}
+  # Mode-aware Compose invocation: scripts/compose_mode.sh appends a generated override
+  # that publishes HTTP_PORT on the selected entry service and owns dsh-http-entry.
+  MODE_COMPOSE: >-
+    {{.MODE_ENV}}
+    sh '{{.MODE_HELPER}}' run
+  ALL_PROFILES: >-
+    --profile dsh
+    --profile auth
+    --profile tls
+    --profile build
+
+
+env:
+  BUILDX_CONFIG: '{{ coalesce .BUILDX_CONFIG .BUILDX_DIR }}'
+  # A configured network name means "join this existing external network" unless the caller
+  # explicitly supplies the corresponding *_EXTERNAL value.
+  BUILDER_NETWORK_EXTERNAL:
+    sh: >-
+      if [ -n "${BUILDER_NETWORK_EXTERNAL:-}" ]; then echo "$BUILDER_NETWORK_EXTERNAL";
+      elif [ -n "${BUILDER_NETWORK:-}" ]
+      || grep -qsE '^[[:space:]]*(export[[:space:]]+)?BUILDER_NETWORK=..*' '{{.ROOT_DIR}}/.env';
+      then echo true; else echo false; fi
+  RUN_NETWORK_EXTERNAL:
+    sh: >-
+      if [ -n "${RUN_NETWORK_EXTERNAL:-}" ]; then echo "$RUN_NETWORK_EXTERNAL";
+      elif [ -n "${RUN_NETWORK:-}" ]
+      || grep -qsE '^[[:space:]]*(export[[:space:]]+)?RUN_NETWORK=..*' '{{.ROOT_DIR}}/.env';
+      then echo true; else echo false; fi
+
+
+tasks:
+  default:
+    desc: List all tasks
+    silent: true
+    cmds:
+      - task --list
+
+  config:validate:
+    desc: Validate deployment switches, ports, and the selected Compose model
+    silent: true
+    cmds:
+      - |-
+        if [ -z '{{ default "" .HTTP_PORT }}' ] && [ -n '{{ default "" .GATEWAY_PORT }}' ]; then
+          echo "warning: GATEWAY_PORT is deprecated; rename it to HTTP_PORT" >&2
+        fi
+        if [ '{{.HTTP_PORT_VALUE}}' = '{{.HTTPS_PORT_VALUE}}' ]; then
+          echo "error: HTTP_PORT and HTTPS_PORT must differ because both stay published" >&2
+          exit 2
+        fi
+        echo "mode={{.MODE}} AUTH_GATEWAY={{.AUTH_ENABLED}} HTTPS_EXPORT={{.HTTPS_ENABLED}} primary={{.PRIMARY_SERVICE}} http_entry={{.HTTP_ENTRY}} HTTP_PORT={{.HTTP_PORT_VALUE}} HTTPS_PORT={{.HTTPS_PORT_VALUE}}"
+      # Renders the base and the selected override model, then asserts: removed legacy
+      # services absent, exactly one HTTP publisher, exactly one dsh-http-entry owner, and
+      # runtimes unpublished in auth mode.
+      - AUTH_GATEWAY='{{.AUTH_ENABLED}}' HTTP_PORT='{{.HTTP_PORT_VALUE}}' sh '{{.MODE_HELPER}}' validate
+
+  config:show:
+    desc: Render the effective Compose model for the selected mode
+    cmds:
+      - task: config:validate
+      - '{{.MODE_COMPOSE}} {{.ALL_PROFILES}} config'
+
+  init:
+    desc: Clone the DeepSeek Harness source checkout if missing
+    deps: [dirs:base]
+    status:
+      - test -d '{{.REPO_DIR}}/.git'
+      - test -f '{{.REPO_DIR}}/package.json'
+    cmds:
+      - >-
+        if [ -e '{{.REPO_DIR}}' ]; then
+          echo 'error: {{.REPO_DIR}} exists but is not a valid DeepSeek Harness checkout' >&2;
+          echo 'hint: a directory holding only .pnpm-store is a leftover of an interrupted run; remove it and retry' >&2;
+          exit 1;
+        fi
+      - git clone -- '{{.DSH_REPO_URL}}' '{{.REPO_DIR}}'
+
+  build:
+    desc: Build builder/runtime images and source artifacts; start no runtime services
+    # dirs chains init (clone) before the store mkdir; see the note on dirs.
+    deps: [dirs]
+    preconditions:
+      - test -f '{{.REPO_DIR}}/package.json'
+    cmds:
+      - task: image:builder
+      - task: image:runner
+      - '{{.COMPOSE}} --profile build run --rm --no-deps builder'
+
+  image:builder:
+    desc: Build the one-shot builder image
+    # dirs:base only: image builds need BUILDX_DIR but not the pnpm store, so they
+    # must not inherit init (the clone) through dirs.
+    deps: [dirs:base]
+    cmds:
+      - '{{.COMPOSE}} --profile build build builder'
+
+  image:runner:
+    desc: Build the shared dsh runtime image
+    deps: [dirs:base]
+    cmds:
+      - '{{.COMPOSE}} --profile build build dsh-runtime'
+
+  # ------------------------------------------------------------ internal reconcile tasks
+  _entry:conflict-clean:
+    desc: Remove project containers that hold HTTP_PORT but are not the selected entry
+    internal: true
+    cmds:
+      - >-
+        {{.MODE_ENV}}
+        sh {{.MODE_HELPER}} entry-clean
+
+  _legacy:clean:
+    desc: Remove containers of services deleted from compose.yaml (guarded by project label)
+    internal: true
+    cmds:
+      - sh {{.MODE_HELPER}} legacy-clean
+
+  _tls:refresh:
+    desc: Best-effort nginx reload inside a running tls container; never changes lifecycle
+    internal: true
+    cmds:
+      - sh {{.MODE_HELPER}} tls-refresh
+
+  _dsh:reconcile:
+    internal: true
+    vars:
+      # Resolved *dsh-runtime service name; empty means "every selected instance".
+      # A target must consume UP_ARGS only: the caller's root CLI_ARGS (the raw
+      # "-- <name> [flags]" string) propagates into task calls and would inject
+      # the bare instance name into the Compose command line.
+      TARGET: '{{ default "" .UP_TARGET }}'
+      EFFECTIVE_ARGS: '{{ if .TARGET }}{{ default "" .UP_ARGS }}{{ else }}{{ default .CLI_ARGS .UP_ARGS }}{{ end }}'
+    cmds:
+      - task: _entry:conflict-clean
+      - |-
+        if [ -n '{{.TARGET}}' ]; then
+          if [ '{{.AUTH_ENABLED}}' = false ] && [ '{{.TARGET}}' != '{{.PRIMARY_SERVICE}}' ]; then
+            echo "warning: AUTH_GATEWAY=false publishes HTTP only on '{{.PRIMARY_SERVICE}}'; '{{.TARGET}}' starts without a published port" >&2
+          fi
+          {{.MODE_COMPOSE}} --profile dsh up -d --no-deps {{.EFFECTIVE_ARGS}} '{{.TARGET}}'
+        elif [ '{{.AUTH_ENABLED}}' = false ]; then
+          if [ -n '{{.OTHER_DSH_SERVICES}}' ]; then
+            {{.COMPOSE}} --profile dsh rm -sf {{.OTHER_DSH_SERVICES}}
+          fi
+          {{.MODE_COMPOSE}} --profile dsh up -d --no-deps {{.EFFECTIVE_ARGS}} '{{.PRIMARY_SERVICE}}'
+        else
+          {{.MODE_COMPOSE}} --profile dsh up -d --no-deps {{.EFFECTIVE_ARGS}} {{.DSH_SERVICE_ARGS}}
+        fi
+
+  _auth:reconcile:
+    internal: true
+    vars:
+      EFFECTIVE_ARGS: '{{ default .CLI_ARGS .UP_ARGS }}'
+    cmds:
+      - |-
+        if [ '{{.AUTH_ENABLED}}' = true ]; then
+          {{.MODE_COMPOSE}} --profile auth up -d --no-deps {{.EFFECTIVE_ARGS}} authelia gateway
+        else
+          {{.COMPOSE}} --profile auth rm -sf
+        fi
+
+  _tls:reconcile:
+    internal: true
+    vars:
+      EFFECTIVE_ARGS: '{{ default .CLI_ARGS .UP_ARGS }}'
+    cmds:
+      - |-
+        if [ '{{.HTTPS_ENABLED}}' = true ]; then
+          {{.MODE_COMPOSE}} --profile tls up -d --no-deps {{.EFFECTIVE_ARGS}} tls
+        fi
+      - task: _tls:refresh
+
+  # Restart helpers for the aggregate `restart` task. They follow the same switch
+  # discipline as the reconcile tasks: a disabled block is skipped, a selected block
+  # whose containers were never created is a silent no-op (docker compose restart
+  # tolerates missing containers), and no container is ever created or removed.
+  _auth:restart:
+    internal: true
+    cmds:
+      - |-
+        if [ '{{.AUTH_ENABLED}}' = true ]; then
+          {{.COMPOSE}} --profile auth restart authelia gateway
+        fi
+
+  _tls:restart:
+    internal: true
+    cmds:
+      - |-
+        if [ '{{.HTTPS_ENABLED}}' = true ]; then
+          {{.COMPOSE}} --profile tls restart tls
+        fi
+
+  # ----------------------------------------------------------------------- block tasks
+  dsh:up:
+    desc: Start the selected dsh instances, or one user's (task dsh:up -- <name> [flags])
+    # dirs chains init (clone) before the store mkdir; see the note on dirs.
+    deps: [dirs]
+    preconditions:
+      - test -e '{{.REPO_DIR}}/node_modules'
+      - sh: test -e '{{.REPO_DIR}}/apps/web/dist/index.html'
+        msg: 'source artifacts are missing; run task build first'
+    vars:
+      TARGET_SERVICE:
+        sh: sh '{{.MODE_HELPER}}' target-service '{{.CLI_ARGS}}'
+      TARGET_ARGS:
+        sh: sh '{{.MODE_HELPER}}' target-args '{{.CLI_ARGS}}'
+      EFFECTIVE_ARGS: '{{ if .TARGET_SERVICE }}{{.TARGET_ARGS}}{{ else }}{{ default .CLI_ARGS .UP_ARGS }}{{ end }}'
+    cmds:
+      - task: config:validate
+      - task: image:runner
+      - |-
+        if [ -z '{{.TARGET_SERVICE}}' ]; then
+          sh '{{.MODE_HELPER}}' legacy-clean
+        fi
+      - task: _dsh:reconcile
+        vars:
+          UP_ARGS: '{{.EFFECTIVE_ARGS}}'
+          UP_TARGET: '{{.TARGET_SERVICE}}'
+
+  dsh:down:
+    desc: Stop and remove all dsh instances, or one user's (task dsh:down -- <name>); preserve host data
+    vars:
+      TARGET_SERVICE:
+        sh: sh '{{.MODE_HELPER}}' target-service '{{.CLI_ARGS}}'
+      TARGET_ARGS:
+        sh: sh '{{.MODE_HELPER}}' target-args '{{.CLI_ARGS}}'
+    cmds:
+      - |-
+        if [ -n '{{.TARGET_SERVICE}}' ]; then
+          {{.COMPOSE}} --profile dsh rm -sf {{.TARGET_ARGS}} '{{.TARGET_SERVICE}}'
+        else
+          {{.COMPOSE}} --profile dsh rm -sf
+          sh '{{.MODE_HELPER}}' legacy-clean
+        fi
+
+  dsh:restart:
+    desc: Restart the selected dsh instances, or one user's (task dsh:restart -- <name>)
+    vars:
+      TARGET_SERVICE:
+        sh: sh '{{.MODE_HELPER}}' target-service '{{.CLI_ARGS}}'
+      TARGET_ARGS:
+        sh: sh '{{.MODE_HELPER}}' target-args '{{.CLI_ARGS}}'
+    cmds:
+      - |-
+        if [ -n '{{.TARGET_SERVICE}}' ]; then
+          {{.COMPOSE}} --profile dsh restart {{.TARGET_ARGS}} '{{.TARGET_SERVICE}}'
+        elif [ '{{.AUTH_ENABLED}}' = true ]; then
+          {{.COMPOSE}} --profile dsh restart
+        else
+          {{.COMPOSE}} --profile dsh restart '{{.PRIMARY_SERVICE}}'
+        fi
+
+  dsh:logs:
+    desc: Follow logs for the dsh block
+    cmds:
+      - '{{.COMPOSE}} --profile dsh logs -f'
+
+  auth:up:
+    desc: Start Authelia and the authentication gateway (publishes HTTP_PORT on gateway)
+    preconditions:
+      - sh: test '{{.AUTH_ENABLED}}' = true
+        msg: 'AUTH_GATEWAY=false; set AUTH_GATEWAY=true before task auth:up'
+    vars:
+      EFFECTIVE_ARGS: '{{ default .CLI_ARGS .UP_ARGS }}'
+    cmds:
+      - task: config:validate
+      - task: _entry:conflict-clean
+      - '{{.MODE_COMPOSE}} --profile auth up -d --no-deps {{.EFFECTIVE_ARGS}} authelia gateway'
+
+  auth:down:
+    desc: Stop and remove Authelia and gateway; preserve auth data
+    cmds:
+      - '{{.COMPOSE}} --profile auth rm -sf'
+
+  auth:restart:
+    desc: Restart Authelia and the authentication gateway (requires AUTH_GATEWAY=true)
+    preconditions:
+      - sh: test '{{.AUTH_ENABLED}}' = true
+        msg: 'AUTH_GATEWAY=false; set AUTH_GATEWAY=true before task auth:restart'
+    cmds:
+      - '{{.COMPOSE}} --profile auth restart authelia gateway'
+
+  auth:logs:
+    desc: Follow authentication block logs
+    cmds:
+      - '{{.COMPOSE}} --profile auth logs -f'
+
+  tls:up:
+    desc: Start the built-in HTTPS export (always available, independent of HTTPS_EXPORT)
+    vars:
+      EFFECTIVE_ARGS: '{{ default .CLI_ARGS .UP_ARGS }}'
+    cmds:
+      - task: config:validate
+      - '{{.MODE_COMPOSE}} --profile tls up -d --no-deps {{.EFFECTIVE_ARGS}} tls'
+
+  tls:down:
+    desc: Stop and remove the built-in TLS container; preserve certificates
+    cmds:
+      - '{{.COMPOSE}} --profile tls rm -sf'
+
+  tls:restart:
+    desc: Restart the built-in HTTPS export (always available, independent of HTTPS_EXPORT)
+    cmds:
+      - '{{.COMPOSE}} --profile tls restart tls'
+
+  tls:logs:
+    desc: Follow built-in TLS logs
+    cmds:
+      - '{{.COMPOSE}} --profile tls logs -f tls'
+
+  # ----------------------------------------------------------------------- stack tasks
+  up:
+    desc: Reconcile and start the complete stack selected by AUTH_GATEWAY/HTTPS_EXPORT
+    # dirs chains init (clone) before the store mkdir; see the note on dirs.
+    deps: [dirs]
+    preconditions:
+      - test -e '{{.REPO_DIR}}/node_modules'
+      - sh: test -e '{{.REPO_DIR}}/apps/web/dist/index.html'
+        msg: 'source artifacts are missing; run task build first'
+    vars:
+      EFFECTIVE_ARGS: '{{ default .CLI_ARGS .UP_ARGS }}'
+    cmds:
+      - task: config:validate
+      - task: image:runner
+      - task: _legacy:clean
+      - task: _dsh:reconcile
+        vars:
+          UP_ARGS: '{{.EFFECTIVE_ARGS}}'
+      - task: _auth:reconcile
+        vars:
+          UP_ARGS: '{{.EFFECTIVE_ARGS}}'
+      - task: _tls:reconcile
+        vars:
+          UP_ARGS: '{{.EFFECTIVE_ARGS}}'
+
+  update:
+    desc: Rebuild source artifacts/images, then recreate the selected stack
+    cmds:
+      - task: build
+      - task: config:validate
+      - task: _legacy:clean
+      - task: _dsh:reconcile
+        vars:
+          UP_ARGS: '--force-recreate {{.CLI_ARGS}}'
+      - task: _auth:reconcile
+        vars:
+          UP_ARGS: '--force-recreate {{.CLI_ARGS}}'
+      - task: _tls:reconcile
+        vars:
+          UP_ARGS: '--force-recreate {{.CLI_ARGS}}'
+
+  down:
+    desc: Remove all runtime blocks and managed project resources; preserve host data
+    cmds:
+      - task: tls:down
+      - task: auth:down
+      # CLI_ARGS is pinned so the aggregate task always removes every block even
+      # when invoked with arguments (per-user targeting is dsh:down-only).
+      - task: dsh:down
+        vars:
+          CLI_ARGS: ''
+      - '{{.COMPOSE}} {{.ALL_PROFILES}} down --remove-orphans'
+
+  restart:
+    desc: Restart the complete selected stack (dsh + auth/tls per AUTH_GATEWAY/HTTPS_EXPORT)
+    cmds:
+      # CLI_ARGS is pinned so the aggregate task always restarts every selected
+      # block even when invoked with arguments (per-user targeting is dsh:restart-only).
+      - task: dsh:restart
+        vars:
+          CLI_ARGS: ''
+      - task: _auth:restart
+      - task: _tls:restart
+
+  logs:
+    desc: Follow logs for the currently selected complete stack
+    cmds:
+      - |-
+        case '{{.AUTH_ENABLED}}/{{.HTTPS_ENABLED}}' in
+          false/false) {{.COMPOSE}} --profile dsh logs -f ;;
+          false/true)  {{.COMPOSE}} --profile dsh --profile tls logs -f ;;
+          true/false)  {{.COMPOSE}} --profile dsh --profile auth logs -f ;;
+          true/true)   {{.COMPOSE}} --profile dsh --profile auth --profile tls logs -f ;;
+        esac
+
+  ps:
+    desc: Show containers from every deployment profile
+    cmds:
+      - '{{.COMPOSE}} {{.ALL_PROFILES}} ps -a'
+
+  shell:
+    desc: Enter a dsh container as the host user (no-auth mode defaults to the first instance)
+    vars:
+      INSTANCE: '{{.CLI_ARGS | trim | trimPrefix "dsh-"}}'
+      SERVICE:
+        sh: |-
+          instance='{{.INSTANCE}}'
+          if [ '{{.AUTH_ENABLED}}' = false ] && [ -z "$instance" ]; then
+            sh '{{.MODE_HELPER}}' primary
+            exit 0
+          fi
+          if [ '{{.AUTH_ENABLED}}' = true ] && [ -z "$instance" ]; then
+            echo 'error: multi-user mode requires an instance: task shell -- <name>' >&2
+            exit 2
+          fi
+          match="$(sh '{{.MODE_HELPER}}' services | grep -Fx -m1 "$instance" || true)"
+          if [ -z "$match" ]; then
+            match="$(sh '{{.MODE_HELPER}}' services | grep -Fx -m1 "dsh-$instance" || true)"
+          fi
+          if [ -z "$match" ]; then
+            echo "error: unknown dsh instance '$instance'; available:" >&2
+            sh '{{.MODE_HELPER}}' services >&2
+            exit 2
+          fi
+          echo "$match"
+    cmds:
+      - '{{.COMPOSE}} {{.ALL_PROFILES}} exec -u "{{.HOST_UID_VALUE}}:{{.HOST_GID_VALUE}}" -e HOME=/data/workspace {{.SERVICE}} bash'
+
+  hash:
+    desc: Generate an argon2id digest for authelia/users_database.yml
+    cmds:
+      - >-
+        {{.COMPOSE}} --profile auth run --rm --no-deps authelia
+        authelia crypto hash generate argon2 --password '{{.CLI_ARGS}}'
+
+  # ------------------------------------------------------------------ user tasks
+  # User management lives in scripts/user_admin.sh, which keeps four files in
+  # sync for one user: authelia/users_database.yml, authelia/configuration.yml
+  # (ACL subject), compose.yaml (dsh-<name> instance) and
+  # nginx/gateway.conf.template (upstream + routing map). Passwords travel via
+  # task env (never re-parsed by a shell); positional arguments need "--":
+  #   task user:create -- <name> <password>
+  # and whitespace passwords use the NAME=/PASSWORD= variable form instead.
+  user:create:
+    desc: Create a user with its own dsh instance (task user:create -- <name> <password>)
+    env:
+      DSH_DOMAIN: '{{ default "harness.deepseek.com" .DSH_DOMAIN }}'
+      DSH_USER_ARGS: '{{.CLI_ARGS}}'
+      DSH_USER_NAME: '{{ default "" .NAME }}'
+      DSH_USER_PASSWORD: '{{ default "" .PASSWORD }}'
+    cmds:
+      - sh '{{.ROOT_DIR}}/scripts/user_admin.sh' create
+
+  user:reset_password:
+    desc: Reset a user's Authelia password (task user:reset_password -- <name> <password>)
+    env:
+      DSH_USER_ARGS: '{{.CLI_ARGS}}'
+      DSH_USER_NAME: '{{ default "" .NAME }}'
+      DSH_USER_PASSWORD: '{{ default "" .PASSWORD }}'
+    cmds:
+      - sh '{{.ROOT_DIR}}/scripts/user_admin.sh' reset-password
+
+  user:remove:
+    desc: Remove a user's config and container; keep dsh-home/ and workspace/ data
+    env:
+      DSH_USER_ARGS: '{{.CLI_ARGS}}'
+      DSH_USER_NAME: '{{ default "" .NAME }}'
+    cmds:
+      - sh '{{.ROOT_DIR}}/scripts/user_admin.sh' remove
+
+  user:list:
+    desc: List deployment users (first dsh instance is the primary)
+    cmds:
+      - sh '{{.ROOT_DIR}}/scripts/user_admin.sh' list
+
+  clean:
+    desc: Remove node_modules and build outputs; keep the pnpm store cache
+    cmds:
+      - rm -rf '{{.REPO_DIR}}/node_modules'
+      - find '{{.REPO_DIR}}' \( -name .pnpm-store -o -name .git \) -prune -o -type d \( -name lib -o -name dist \) -prune -exec rm -rf {} +
+      - find '{{.REPO_DIR}}' \( -name .pnpm-store -o -name .git \) -prune -o -name '*.tsbuildinfo' -exec rm -f {} +
+
+  clean:store:
+    desc: Remove the pnpm package store
+    cmds:
+      - rm -rf '{{.STORE_DIR}}'
+
+  # Fixed infra dirs plus the per-user data dirs of every declared dsh instance.
+  # User data dirs are never hardcoded: they are the host bind sources of each
+  # real *dsh-runtime /data mount, resolved from compose.yaml by
+  # `compose_mode.sh data-dirs`. Renaming an instance or re-pointing its mounts
+  # therefore cannot resurrect template leftovers like dsh-home/user, and every
+  # bind source exists before `up` so Docker never auto-creates it root-owned.
+  dirs:base:
+    internal: true
+    cmds:
+      - |-
+        mkdir -p '{{.BUILDX_DIR}}' '{{.ROOT_DIR}}/authelia' '{{.ROOT_DIR}}/nginx/tls'
+        _dirs="$(sh '{{.MODE_HELPER}}' data-dirs)" || exit 1
+        printf '%s\n' "$_dirs" | while IFS= read -r _d; do
+          [ -n "$_d" ] && mkdir -p "$_d"
+        done
+
+  # The pnpm store lives INSIDE the checkout, so it can only be created after the
+  # clone. Task runs `deps:` entries concurrently and does NOT deduplicate a task
+  # referenced from multiple parents, so ordering must be a single chain with each
+  # task referenced exactly once:
+  #   build/up/dsh:up -> dirs -> init -> dirs:base
+  # init is therefore referenced ONLY here; build/up/dsh:up must depend on dirs
+  # alone. Otherwise two concurrent `git clone`s (or mkdir beating the clone, the
+  # original race: "destination path already exists and is not an empty directory")
+  # fight over REPO_DIR. dirs:base stays a dep of init because its mkdir -p is
+  # idempotent and concurrency-safe wherever it is referenced from.
+  dirs:
+    internal: true
+    deps: [init]
+    cmds:
+      - mkdir -p '{{.STORE_DIR}}'

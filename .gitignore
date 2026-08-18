@@ -1,0 +1,20 @@
+.dockerhome
+.buildx/
+
+# Local configuration (contains host uid/gid, ports, optionally an API key)
+.env
+
+deepseek-harness
+
+# Persistent runtime data
+dsh-home/
+workspace/
+
+# Authelia runtime state (users_database.yml / configuration.yml are tracked)
+authelia/db.sqlite3
+authelia/notification.txt
+
+# Self-signed certs of the optional `tls` terminator (generated at container
+# start by nginx/tls-cert.sh; CN/SAN = DSH_DOMAIN)
+nginx/tls/
+

@@ -1,0 +1,188 @@
+# =============================================================================
+# dsh 网关(容器 gateway, nginx:1.31.3-alpine)- 认证模式的 HTTP 入口, 纯 HTTP!
+#
+#     浏览器 --https--> 终结器(caddy 或内置 tls 服务, 卸载 TLS) --http--> 本 nginx :80 --> 后端
+#
+# AUTH_GATEWAY=true 时, scripts/compose_mode.sh 的 override 把 HTTP_PORT 直接发布到
+# 本容器, 并把 runtime 网络别名 dsh-http-entry 指到这里; 内置 tls 服务也经该别名
+# 到达本网关。AUTH_GATEWAY=false 时本服务不启动, 别名由第一个 dsh runtime 实例持有。
+#
+# 模板: ${DSH_DOMAIN} 由官方镜像的 envsubst 在启动时替换(compose 把 .env 的
+# DSH_DOMAIN 注入容器环境, 结果落 /etc/nginx/conf.d/default.conf)。envsubst 只替换
+# 容器已定义的环境变量, nginx 运行时变量($scheme/$http_upgrade/$dsh_user 等)不受影响。
+#
+# 协议透传(重要): Authelia 需知道浏览器实际是 https 才能生成正确的门户跳转/回跳
+# URL。认证模式的浏览器入口始终是 HTTPS；下方 map 只接受规范 https 并 fail closed。
+#
+# 单域名: 业务与门户共用 $DSH_DOMAIN:
+#   https://$DSH_DOMAIN/           业务入口: 先经 authelia 认证, 再按用户(Remote-User)
+#                                  路由到对应 dsh 实例(演示: user -> dsh-user)
+#   https://$DSH_DOMAIN/authelia/  登录门户(匿名可达)
+# 登录流: 未登录 -> authelia 401 -> nginx 302 到 /authelia/?rd=<原地址>(同域只变
+#         路径) -> 门户登录 -> 按 rd 跳回 -> gateway 按用户转发。
+# 分工(方案核心): authelia 拦未登录(401 + Location 跳门户), 登录后在 auth_request
+#   响应带 Remote-User / Remote-Groups; nginx error_page 401 跳登录, 用 map 把
+#   Remote-User 映射到 upstream($dsh_backend), proxy_pass 完成转发。
+# 注意: Authelia 4.39 强制 authelia_url 为 https(配置写死), 完整登录必须经 TLS
+#   终结器; 直连本网关的明文 http 只适合探活与 API 冒烟(见 README「TLS」)。
+# =============================================================================
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# Authelia 4.39 的浏览器侧认证协议必须是 HTTPS。只接受规范的 https 值；缺失、
+# http、逗号列表或其它伪造值一律收敛为 https，避免把任意请求头拼进 X-Original-URL。
+# 认证模式下 HTTP_PORT 始终发布在 gateway 上：它主要供外部 TLS 终结器作为 upstream
+# 使用，浏览器仍应访问 HTTPS_PORT 上的 HTTPS 入口。
+map $http_x_forwarded_proto $dsh_proto {
+    https   https;
+    default https;
+}
+
+# 浏览器侧公开 HTTPS 端口的后缀(443 省略端口)。HTTPS_PORT 由 compose 注入、envsubst
+# 渲染; 用常量源的 map 在 443 与非 443 之间选择是否携带端口。
+map "${HTTPS_PORT}" $dsh_https_port_suffix {
+    "443"    "";
+    default  ":${HTTPS_PORT}";
+}
+
+# 认证回跳的规范 Host。直连 HTTP_PORT 的请求 Host 携带明文端口(如 :3088), 不能把它
+# 拼进 https 的 X-Original-URL(否则登录后 safe-redirection 会把浏览器带回
+# https://域名:明文端口 这种不存在的地址); 一律归一化为 $DSH_DOMAIN[:HTTPS_PORT]。
+# 经内置/外部 TLS 终结器进来的请求本就携带正确的公开端口, 该归一化是幂等操作。
+map $host $dsh_public_host {
+    "${DSH_DOMAIN}"  "${DSH_DOMAIN}$dsh_https_port_suffix";
+    default          $http_host;
+}
+
+# docker 内嵌 DNS(127.0.0.11): 供下方 upstream 的 resolve 参数做运行时解析。
+# resolve 需开源 nginx >= 1.27.3(本部署 1.31.3, 满足; 无 resolver 会启动报错);
+# zone: 带 resolve 的 upstream 必须驻共享内存(nginx 强制, 每个 upstream 一行, 64k 足够)。
+# 为什么 resolve: 域名不再只在配置加载时解析一次 - 曾发生 runtime 容器重建后 IP
+# 洗牌(新实例拿到旧实例的 IP), gateway 按启动时缓存的旧 IP 转发, 用户登录后看到
+# 别人的配置与工作区。authelia 的两处 proxy_pass 同走带 resolve 的 upstream,
+# 单独重建 authelia 时同样免疫。
+resolver 127.0.0.11 valid=10s ipv6=off;
+
+# 各 dsh 实例一个 upstream(加实例时在此追加, 并同步下方 map)。dsh_denied 是
+# fail-closed 兜底：即使 Authelia ACL 与本映射发生漂移，未知身份也只会命中本容器
+# 不监听的 discard 端口并得到 502，绝不能落入首个用户的数据实例。
+upstream dsh_user { zone dsh_user 64k; server dsh-user:80 resolve; }
+upstream dsh_denied { zone dsh_denied 64k; server 127.0.0.1:9; }
+upstream auth_service { zone auth_service 64k; server authelia:9091 resolve; }
+
+# 用户 -> 后端路由表。新增用户时同步 users_database、Authelia subject、Compose
+# dsh runtime 实例、upstream 与本 map。Authelia ACL 正常情况下会先对未知用户返回 403；
+# default 的拒绝 upstream 是第二道防线。
+map $dsh_user $dsh_backend {
+    user         dsh_user;
+    default      dsh_denied;
+}
+
+# ---------------------------------------------------------------------------
+# catch-all: 任何非 $DSH_DOMAIN 的 Host(乱写的 Host、终结器配置串了的域名)
+# -> 干净的 404。authelia 只对自己的 cookie 域生成门户跳转, 未知域名的 401 没有
+# Location 头, 落到主 vhost 会变 nginx 500, 这里提前接住。
+# /healthz 例外: 容器 healthcheck 用 127.0.0.1 访问, 必须永远放行。
+# ---------------------------------------------------------------------------
+server {
+    listen 80 default_server;
+    server_name _;
+
+    location = /healthz {
+        access_log off;
+        return 200 "ok\n";
+    }
+
+    # 404 必须放在 location 里 - server 级的 return 在 rewrite 阶段执行,
+    # 会抢在 location 匹配之前把 /healthz 也拦掉。
+    location / {
+        return 404 "unknown host\n";
+    }
+}
+
+server {
+    listen 80;
+    server_name ${DSH_DOMAIN};
+
+    client_max_body_size 100m;
+
+    # 调试/验收可见: 响应头标明命中的后端(curl -I 观察 X-Dsh-Backend)
+    add_header X-Dsh-Backend $dsh_backend always;
+
+    # ------------------------------------------------------------------
+    # 登录门户: authelia 挂在 /authelia/ 子路径(configuration.yml 的
+    # server.address 带了 /authelia 路径, 资源引用为相对路径)。
+    # 匿名可达(不做 auth_request, 否则没人能登录); URI 原样透传。
+    # ------------------------------------------------------------------
+    location = /authelia {
+        return 302 /authelia/;
+    }
+
+    location /authelia/ {
+        proxy_pass http://auth_service;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        # 原始协议(通常来自终结器的 https), authelia 依赖它生成正确 URL
+        proxy_set_header X-Forwarded-Proto $dsh_proto;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+    }
+
+    # authelia 鉴权子请求(内部端点; /api/authz/auth-request 旧路径依旧有效)
+    location = /_authelia {
+        internal;
+        proxy_pass http://auth_service/api/authz/auth-request;
+        proxy_set_header X-Original-Method $request_method;
+        # 使用规范 Host($dsh_public_host)而非 $http_host: 无论请求从明文 HTTP_PORT 还是
+        # TLS 终结器进来, Authelia 的门户跳转与 rd 回跳都指向 https://$DSH_DOMAIN[:HTTPS_PORT]。
+        proxy_set_header X-Original-URL   $dsh_proto://$dsh_public_host$request_uri;
+        proxy_set_header X-Forwarded-Proto $dsh_proto;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header Content-Length "";
+        proxy_set_header Content-Type "";
+        proxy_pass_request_body off;
+    }
+
+    # 网关自身存活探针(容器 healthcheck 用, 不走认证)
+    location = /healthz {
+        access_log off;
+        return 200 "ok\n";
+    }
+
+    # ------------------------------------------------------------------
+    # 业务入口: 其余全部路径
+    # ------------------------------------------------------------------
+    location / {
+        auth_request /_authelia;
+
+        # 捕获 authelia 的判定结果
+        auth_request_set $dsh_user        $upstream_http_remote_user;
+        auth_request_set $dsh_groups      $upstream_http_remote_groups;
+        auth_request_set $redirection_url $upstream_http_location;
+
+        # 未登录(401) -> 跳到同域名的登录门户(authelia 生成的 Location 自带
+        # rd 回跳参数, 指向 https://$DSH_DOMAIN/authelia/?rd=...)
+        error_page 401 =302 $redirection_url;
+
+        # 已登录 -> 按用户路由到对应 dsh 实例(各 dsh 容器内的 nginx :80 再反代
+        # 容器内 127.0.0.1:3080 的 dsh web, Host/Origin 归一化已由内层完成)
+        proxy_pass http://$dsh_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $dsh_proto;
+        proxy_set_header X-Forwarded-User  $dsh_user;
+        # WS/SSE: 关缓冲 + 长超时
+        proxy_buffering off;
+        proxy_read_timeout  3600s;
+        proxy_send_timeout  3600s;
+    }
+}

@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# DeepSeek Harness (dsh) - TLS 终结器镜像(可选服务 `tls`)
+#
+# 官方 nginx alpine + openssl CLI(官方镜像只有 nginx 链接的库, 不带 openssl
+# 命令, 而本服务要在 nginx 启动前为 $DSH_DOMAIN 自签证书 - 由 compose 挂进
+# /docker-entrypoint.d/ 的 nginx/tls-cert.sh 完成, 官方入口先跑完该目录再 exec
+# nginx)。与 gateway 服务用同一版本的基础镜像, 保持行为一致。
+# =============================================================================
+FROM nginx:1.31.3-alpine
+
+# 仅补 openssl(CLI + 依赖库, 约 3MB), 无其它改动: 配置模板由 compose 挂载到
+# /etc/nginx/templates/, 证书落在挂载的 /etc/nginx/tls/。
+RUN apk add --no-cache openssl
