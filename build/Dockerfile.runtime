@@ -3,7 +3,7 @@
 # DeepSeek Harness (dsh) - RUNTIME 镜像
 #
 # 只含工具链与 nginx 反代, 从不 COPY 仓库: compose 把(builder 已安装构建的)
-# 宿主机检出挂到 /opt/dsh, 入口从中跑 `pnpm dsh web`。容器内栈:
+# 宿主机检出挂到 /app/dsh, 入口从中跑 `pnpm dsh web`。容器内栈:
 #   dsh web(仅 127.0.0.1:3080, by design)
 #     <- nginx :80 (HTTP)
 # 与 builder 镜像同理烧入 .env 的 HOST_UID/HOST_GID 非特权用户 dsh, 入口经
@@ -31,14 +31,14 @@ ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/local/s
 #    'bat'->bat(二进制 batcat); fd/bat 软链出常用名, /usr/local/bin 在 PATH 首位。
 # ---------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates tzdata curl git gnupg xz-utils build-essential \
-      python3 python3-dev python3-pip python3-venv procps openssl unzip jq \
-      ripgrep wget less nginx bubblewrap \
-      gh sqlite3 fd-find tree vim openssh-client zip fzf bat cmake \
-      net-tools psmisc iputils-ping \
-    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
-    && ln -s /usr/bin/batcat /usr/local/bin/bat \
-    && rm -rf /var/lib/apt/lists/*
+  ca-certificates tzdata curl git gnupg xz-utils build-essential \
+  python3 python3-dev python3-pip python3-venv procps openssl unzip jq \
+  ripgrep wget less nginx bubblewrap sudo \
+  gh sqlite3 fd-find tree vim openssh-client zip fzf bat cmake \
+  net-tools psmisc iputils-ping \
+  && ln -s /usr/bin/fdfind /usr/local/bin/fd \
+  && ln -s /usr/bin/batcat /usr/local/bin/bat \
+  && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
 # 2. Node.js + pnpm(锁定 package.json 的 "packageManager")
@@ -55,7 +55,7 @@ RUN arch="$(dpkg --print-architecture)"; case "$arch" in amd64) uv_arch="x86_64"
 #    配置由 ./nginx-dsh.conf(小 build context 的一部分)原样 COPY; 无运行时挂载,
 #    改动需重建本镜像。
 # ---------------------------------------------------------------------------
-WORKDIR /opt/dsh
+WORKDIR /app/dsh
 
 RUN rm -f /etc/nginx/sites-enabled/default
 COPY nginx-dsh.conf /etc/nginx/conf.d/dsh.conf
@@ -69,9 +69,14 @@ RUN nginx -t
 #    uid/gid 相撞会直接构建失败。HOME 指向运行时挂载的 /data/workspace
 #    (--home-dir; 目录由入口在启动时创建, 故 --no-create-home), uid->home 查询
 #    与 `docker exec -u dsh` 都解析到同一真实目录而非幽灵 /home/dsh。
+#    另授权 dsh 免密 sudo 到 root: drop-in 写入 /etc/sudoers.d/dsh(Debian 的
+#    /etc/sudoers 已 @include 该目录), 440 权限, visudo -c 构建期校验语法。
 # ---------------------------------------------------------------------------
 RUN groupadd --gid "${HOST_GID}" dsh \
-  && useradd --uid "${HOST_UID}" --gid "${HOST_GID}" --home-dir /data/workspace --no-create-home --shell /bin/bash dsh
+  && useradd --uid "${HOST_UID}" --gid "${HOST_GID}" --home-dir /data/workspace --no-create-home --shell /bin/bash dsh \
+  && printf 'dsh ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/dsh \
+  && chmod 440 /etc/sudoers.d/dsh \
+  && visudo -c
 
 # ---------------------------------------------------------------------------
 # 6. 脚本: 入口(校验挂载检出、跑 'dsh web' + nginx、转发信号、任一退出即退)

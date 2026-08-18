@@ -29,7 +29,7 @@ if ! getent passwd "${DSH_UID}" >/dev/null; then
 fi
 
 mkdir -p "${DSH_HOME}" /data/workspace
-cd /opt/dsh
+cd /app/dsh
 
 # 数据挂载归宿主机用户; 若 docker daemon 在首启前以 root 建了顶层目录, 移交之。
 # 已有文件不动 - 只修宿主机上既存的 root 属主数据。
@@ -40,10 +40,10 @@ chown "${DSH_UID}:${DSH_GID}" "${DSH_HOME}" /data/workspace 2>/dev/null || \
 # 必须已含安装+构建产物(node_modules 来自 pnpm install, apps/web/dist 来自
 # pnpm run build), 由 builder 容器(`task build`)在宿主机产出。
 for p in node_modules apps/web/dist/index.html; do
-  if [ ! -e "/opt/dsh/${p}" ]; then
-    echo "[entrypoint] FATAL: /opt/dsh/${p} is missing." >&2
+  if [ ! -e "/app/dsh/${p}" ]; then
+    echo "[entrypoint] FATAL: /app/dsh/${p} is missing." >&2
     echo "[entrypoint] This image ships no sources: compose mounts the host" >&2
-    echo "[entrypoint] checkout at /opt/dsh. Run 'task build' on the host" >&2
+    echo "[entrypoint] checkout at /app/dsh. Run 'task build' on the host" >&2
     echo "[entrypoint] first (builder container: pnpm install + build)." >&2
     exit 1
   fi

@@ -98,17 +98,17 @@ DSH_DOMAIN=dsh.localhost
 
 ### 常用命令速查
 
-| 场景                      | 命令                                                                     |
-| ------------------------- | ------------------------------------------------------------------------ |
-| 启动 / 收敛当前模式       | `task up`                                                                |
-| 停止全部容器（保留数据）  | `task down`                                                              |
+| 场景                       | 命令                                                                     |
+| -------------------------- | ------------------------------------------------------------------------ |
+| 启动 / 收敛当前模式        | `task up`                                                                |
+| 停止全部容器（保留数据）   | `task down`                                                              |
 | 重启（强制重建）当前模式栈 | `task restart`                                                           |
-| 查看容器状态              | `task ps`                                                                |
-| 跟踪日志                  | `task logs`，或分块 `task dsh:logs` / `auth:logs` / `tls:logs`           |
-| 升级版本                  | `task update`                                                            |
-| 进入实例 shell            | `task shell`（无认证模式进入第一个实例）；认证模式 `task shell -- user1` |
-| 校验配置                  | `task config:validate`                                                   |
-| 查看渲染后的 Compose 模型 | `task config:show`                                                       |
+| 查看容器状态               | `task ps`                                                                |
+| 跟踪日志                   | `task logs`，或分块 `task dsh:logs` / `auth:logs` / `tls:logs`           |
+| 升级版本                   | `task update`                                                            |
+| 进入实例 shell             | `task shell`（无认证模式进入第一个实例）；认证模式 `task shell -- user1` |
+| 校验配置                   | `task config:validate`                                                   |
+| 查看渲染后的 Compose 模型  | `task config:show`                                                       |
 
 ### 切换运行模式
 
@@ -145,25 +145,25 @@ task user:list                              # 查看用户列表
 
 ### 总栈与维护命令
 
-| 命令                                          | 作用                                                                                                                                                                                 |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `task up`                                     | 收敛并启动两个开关选中的完整模式                                                                                                                                                     |
-| `task down`                                   | 清除 dsh/auth/tls 的全部运行容器及项目资源，保留挂载数据                                                                                                                             |
-| `task update`                                 | 重建源码产物和镜像，再强制重建当前目标模式（`HTTPS_EXPORT=false` 时不重建也不移除已有 TLS 容器，仅对运行中的容器做 best-effort reload）                                              |
-| `task build`                                  | 构建 builder/runtime 镜像和源码产物，不启动运行服务                                                                                                                                  |
-| `task config:validate`                        | 校验布尔值、端口、合并模型不变量，并输出所选模式与 HTTP 入口                                                                                                                         |
-| `task config:show`                            | 展示当前模式渲染后的 Compose 模型                                                                                                                                                    |
-| `task ps`                                     | 显示所有 profile 中的容器                                                                                                                                                            |
-| `task logs`                                   | 跟踪当前完整模式日志                                                                                                                                                                 |
-| `task dsh:logs` / `auth:logs` / `tls:logs`    | 跟踪指定块日志                                                                                                                                                                       |
+| 命令                                          | 作用                                                                                                                                                                                                                            |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `task up`                                     | 收敛并启动两个开关选中的完整模式                                                                                                                                                                                                |
+| `task down`                                   | 清除 dsh/auth/tls 的全部运行容器及项目资源，保留挂载数据                                                                                                                                                                        |
+| `task update`                                 | 重建源码产物和镜像，再强制重建当前目标模式（`HTTPS_EXPORT=false` 时不重建也不移除已有 TLS 容器，仅对运行中的容器做 best-effort reload）                                                                                         |
+| `task build`                                  | 构建 builder/runtime 镜像和源码产物，不启动运行服务                                                                                                                                                                             |
+| `task config:validate`                        | 校验布尔值、端口、合并模型不变量，并输出所选模式与 HTTP 入口                                                                                                                                                                    |
+| `task config:show`                            | 展示当前模式渲染后的 Compose 模型                                                                                                                                                                                               |
+| `task ps`                                     | 显示所有 profile 中的容器                                                                                                                                                                                                       |
+| `task logs`                                   | 跟踪当前完整模式日志                                                                                                                                                                                                            |
+| `task dsh:logs` / `auth:logs` / `tls:logs`    | 跟踪指定块日志                                                                                                                                                                                                                  |
 | `task restart`                                | 以 `up -d --force-recreate` 重建两个开关选中的完整栈：dsh 实例 + `AUTH_GATEWAY=true` 时的 auth 块 + `HTTPS_EXPORT=true` 时的 tls 块；未创建的所选块会被直接创建（模式切换仍请用 `task up`，restart 不清理与新模式冲突的旧容器） |
-| `task shell`                                  | 无认证模式默认进入第一个实例；认证模式使用 `task shell -- user`                                                                                                                      |
-| `task hash -- '口令'`                         | 生成 Authelia argon2id 密码摘要                                                                                                                                                      |
-| `task user:create -- <name> <密码>`           | 创建用户：同步 Authelia 用户库/ACL、compose 实例、gateway 路由并创建数据目录                                                                                                         |
-| `task user:reset_password -- <name> <新密码>` | 重置用户密码（重新生成 argon2id 摘要）                                                                                                                                               |
-| `task user:remove -- <name>`                  | 删除用户全部配置与运行容器；**保留** `dsh-home/<name>`、`workspace/<name>`                                                                                                           |
-| `task user:list`                              | 列出用户（标注 primary 实例）                                                                                                                                                        |
-| `task clean` / `task clean:store`             | 清构建产物 / 再清 pnpm store                                                                                                                                                         |
+| `task shell`                                  | 无认证模式默认进入第一个实例；认证模式使用 `task shell -- user`                                                                                                                                                                 |
+| `task hash -- '口令'`                         | 生成 Authelia argon2id 密码摘要                                                                                                                                                                                                 |
+| `task user:create -- <name> <密码>`           | 创建用户：同步 Authelia 用户库/ACL、compose 实例、gateway 路由并创建数据目录                                                                                                                                                    |
+| `task user:reset_password -- <name> <新密码>` | 重置用户密码（重新生成 argon2id 摘要）                                                                                                                                                                                          |
+| `task user:remove -- <name>`                  | 删除用户全部配置与运行容器；**保留** `dsh-home/<name>`、`workspace/<name>`                                                                                                                                                      |
+| `task user:list`                              | 列出用户（标注 primary 实例）                                                                                                                                                                                                   |
+| `task clean` / `task clean:store`             | 清构建产物 / 再清 pnpm store                                                                                                                                                                                                    |
 
 ### 块级命令
 
@@ -171,13 +171,13 @@ task user:list                              # 查看用户列表
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `task dsh:up`       | 启动选中的 dsh 块：`AUTH_GATEWAY=false` 只启动第一个实例并直接发布 `HTTP_PORT`；`true` 启动全部实例（无宿主机端口）。可指定单个用户：`task dsh:up -- user1 [--force-recreate 等 compose 参数]` |
 | `task dsh:down`     | 删除全部 dsh 实例及旧版遗留容器；保留宿主机数据。可指定单个用户：`task dsh:down -- user1` 只删除该实例（同时跳过遗留容器清理）                                                                 |
-| `task dsh:restart`  | 以 `up -d --force-recreate` 重建选中的 dsh 实例（`AUTH_GATEWAY=false` 只重建第一个实例，其余实例不动）。可指定单个用户：`task dsh:restart -- user1`                                                                            |
+| `task dsh:restart`  | 以 `up -d --force-recreate` 重建选中的 dsh 实例（`AUTH_GATEWAY=false` 只重建第一个实例，其余实例不动）。可指定单个用户：`task dsh:restart -- user1`                                            |
 | `task auth:up`      | 启动 Authelia/gateway，`HTTP_PORT` 直接发布在 gateway；要求 `AUTH_GATEWAY=true`                                                                                                                |
 | `task auth:down`    | 删除 Authelia、gateway；保留认证数据                                                                                                                                                           |
 | `task auth:restart` | 以 `up -d --force-recreate` 重建 Authelia/gateway；要求 `AUTH_GATEWAY=true`（会使 Authelia 内存会话失效，用户需重新登录）                                                                      |
 | `task tls:up`       | 启动内置 TLS；**不受 `HTTPS_EXPORT` 限制**，随时可用                                                                                                                                           |
 | `task tls:down`     | 删除内置 TLS 容器；保留证书                                                                                                                                                                    |
-| `task tls:restart`  | 以 `up -d --force-recreate` 重建内置 TLS 容器；**不受 `HTTPS_EXPORT` 限制**，随时可用                                                                                                            |
+| `task tls:restart`  | 以 `up -d --force-recreate` 重建内置 TLS 容器；**不受 `HTTPS_EXPORT` 限制**，随时可用                                                                                                          |
 
 块级命令互相独立。若只启动下游块，上游缺失时看到 502 属于预期；上游出现后自动恢复。`restart` 系列以 `up -d --force-recreate` 强制重建所选容器（容器按当前 Compose 模型重建，端口/别名等配置会一并应用；未创建的所选容器会被直接创建），但从不删除所选范围之外的容器，也不做入口冲突清理——切换模式请用 `task up`。
 
@@ -402,7 +402,7 @@ https://DSH_DOMAIN[:HTTPS_PORT]/authelia/
 
 | 宿主机路径          | 容器内路径        | 范围                                                |
 | ------------------- | ----------------- | --------------------------------------------------- |
-| `deepseek-harness/` | `/opt/dsh`        | 所有实例共享的代码和构建产物，读写挂载              |
+| `deepseek-harness/` | `/app/dsh`        | 所有实例共享的代码和构建产物，读写挂载              |
 | `dsh-home/<name>/`  | `/data/dsh-home`  | 对应用户实例（无认证模式为第一个实例）独立 DSH_HOME |
 | `workspace/<name>/` | `/data/workspace` | 对应实例独立工作区                                  |
 | `authelia/`         | `/config`         | 用户库、配置、sqlite 与通知文件                     |
@@ -413,7 +413,7 @@ https://DSH_DOMAIN[:HTTPS_PORT]/authelia/
 隔离边界必须明确：
 
 - 认证用户的 DSH_HOME 和 workspace 彼此独立；
-- 所有实例共享 `/opt/dsh` 代码，因此任一实例对源码的修改对其他实例可见，这不是代码级隔离；
+- 所有实例共享 `/app/dsh` 代码，因此任一实例对源码的修改对其他实例可见，这不是代码级隔离；
 - `.env` 中 `DEEPSEEK_API_KEY` 会注入所有 dsh 实例，是可选的共享密钥；
 - 若需要用户独立 API key，不要设置共享环境变量，而应在各自 UI 中保存到独立 DSH_HOME；
 - 除模式选中的 HTTP 入口和 TLS 端口外，任何 dsh 服务都不应额外向宿主机发布端口，否则会绕过外层认证边界。

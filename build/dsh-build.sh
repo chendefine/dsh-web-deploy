@@ -9,11 +9,11 @@
 # error`(0 字节文件的 ENOEXEC)。
 set -euo pipefail
 
-cd /opt/dsh
+cd /app/dsh
 
 # 挂载检出属主与 HOST_UID 不符时, 一行清晰报错代替满屏 EACCES。
 if [ "$(stat -c '%u' .)" != "$(id -u)" ] || [ "$(stat -c '%g' .)" != "$(id -g)" ]; then
-  echo "[builder] FATAL: /opt/dsh is owned by $(stat -c '%u:%g' .), but the builder runs as $(id -u):$(id -g) (HOST_UID/HOST_GID from .env)." >&2
+  echo "[builder] FATAL: /app/dsh is owned by $(stat -c '%u:%g' .), but the builder runs as $(id -u):$(id -g) (HOST_UID/HOST_GID from .env)." >&2
   echo "[builder] Align them: chown the checkout on the host, or adjust HOST_UID/HOST_GID in .env and rebuild." >&2
   exit 1
 fi

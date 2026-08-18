@@ -48,7 +48,7 @@ x-dsh-runtime: &dsh-runtime
     DSH_UID: ${HOST_UID:-1000}
     DSH_GID: ${HOST_GID:-1000}
   volumes:
-    - &dsh-checkout ./deepseek-harness:/opt/dsh:ro
+    - &dsh-checkout ./deepseek-harness:/app/dsh:ro
   networks:
     - runtime
 
@@ -60,6 +60,11 @@ services:
     image: nginx:1.31.3-alpine
     container_name: dsh-base-gateway
     restart: unless-stopped
+    # nginx 镜像声明 STOPSIGNAL SIGQUIT(优雅关停): worker 会等待所有现存连接结束,
+    # 而这里代理的是 SSE/WS 长连接(proxy_*_timeout 3600s)且未设 worker_shutdown_timeout,
+    # 等待无上限 - 停止总要耗满 Docker 默认 10s 宽限期后被 SIGKILL(task down 因此慢
+    # 约 20s)。整栈拆除时无需 drain, 改发 SIGTERM 让 nginx 快速关停, 与其他服务一致。
+    stop_signal: SIGTERM
     profiles: [ "auth" ]
     environment:
       DSH_DOMAIN: ${DSH_DOMAIN:-harness.deepseek.com}
@@ -110,6 +115,8 @@ services:
     image: dsh-tls:latest
     container_name: dsh-base-tls
     restart: unless-stopped
+    # 同 gateway: 覆盖镜像的 SIGQUIT, 避免长连接把停止拖到 10s 宽限期上限。
+    stop_signal: SIGTERM
     profiles: [ "tls" ]
     ports:
       - "${HTTPS_PORT:-443}:443"
@@ -161,8 +168,8 @@ services:
     restart: "no"
     profiles: [ "build" ]
     volumes:
-      - ./deepseek-harness:/opt/dsh
-      - ./overrides/loopback-hostname.ts:/opt/dsh/packages/client/connection/src/loopback-hostname.ts:ro
+      - ./deepseek-harness:/app/dsh
+      - ./overrides/loopback-hostname.ts:/app/dsh/packages/client/connection/src/loopback-hostname.ts:ro
     networks:
       - builder
 
