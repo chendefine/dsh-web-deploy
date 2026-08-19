@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 运行时容器入口(COPY 进镜像 /usr/local/bin/docker-entrypoint.sh, 见
 # Dockerfile.runtime): 校验挂载的检出、跑 'dsh web'(以 .env 的非特权用户)+
-# nginx(root)、转发信号、任一退出即退。降权启动器 /usr/local/bin/dsh-run.sh
-# 同样 COPY 进镜像, 不在启动时生成。
+# nginx(root)、转发信号、任一退出即退。dsh CLI 包装器 /usr/local/bin/dsh
+# (exec 检出 node_modules 里的 tsx 直跑 apps/cli/src/bin.ts, 与 package.json
+# 的 'dsh' 脚本等价)同样 COPY 进镜像, 不在启动时生成。
 #
 # 进程模型:
 #   root      本入口 + nginx master(绑 :80); nginx worker 自行降为 nginx 用户
@@ -38,8 +39,10 @@ chown "${DSH_UID}:${DSH_GID}" "${DSH_HOME}" /data/workspace 2>/dev/null || \
 
 # --- 预检: 检出是挂载的, 从不烧进镜像 -------------------------------
 # 必须已含安装+构建产物(node_modules 来自 pnpm install, apps/web/dist 来自
-# pnpm run build), 由 builder 容器(`task build`)在宿主机产出。
-for p in node_modules apps/web/dist/index.html; do
+# pnpm run build), 由 builder 容器(`task build`)在宿主机产出。除 web 产物外
+# 也查 dsh 包装器的两处依赖: node_modules/.bin/tsx 与 apps/cli/src/bin.ts
+# (package.json 的 'dsh' 脚本同一路径), 缺失即提前给出可操作的报错。
+for p in node_modules/.bin/tsx apps/cli/src/bin.ts apps/web/dist/index.html; do
   if [ ! -e "/app/dsh/${p}" ]; then
     echo "[entrypoint] FATAL: /app/dsh/${p} is missing." >&2
     echo "[entrypoint] This image ships no sources: compose mounts the host" >&2
@@ -57,7 +60,7 @@ done
 # 不要在这里重新生成。
 echo "[entrypoint] dsh web -> http://127.0.0.1:3080  (DSH_HOME=${DSH_HOME}, user ${DSH_UID}:${DSH_GID})"
 setpriv --reuid="${DSH_UID}" --regid="${DSH_GID}" --clear-groups \
-  env HOME=/data/workspace /usr/local/bin/dsh-run.sh &
+  env HOME=/data/workspace /usr/local/bin/dsh web &
 dsh_pid=$!
 
 echo "[entrypoint] nginx :80 (http) -> 127.0.0.1:3080"
