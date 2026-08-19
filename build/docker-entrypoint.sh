@@ -37,6 +37,21 @@ cd /app/dsh
 chown "${DSH_UID}:${DSH_GID}" "${DSH_HOME}" /data/workspace 2>/dev/null || \
   echo "[entrypoint] WARN: could not chown data dirs (running as $(id -u):$(id -g))" >&2
 
+# --- 首启播种 dsh 的交互式 shell 配置 ---------------------------------
+# .zshrc 是镜像定制的 oh-my-zsh 模板(Dockerfile.runtime 步骤 7), .bashrc/
+# .profile 则是 Debian 基础镜像 /etc/skel 自带 - 登录 shell 是 zsh 只读
+# .zshrc, 后两者服务 'docker exec ... bash' 与 'bash -l' 场景(Debian 的
+# .profile 会 source .bashrc)。dsh 的 HOME=/data/workspace 是运行时挂载、
+# 构建期不存在 - 每个文件各自仅在缺失时播种一次, 已有文件(含用户后续
+# 改动)永不覆盖。
+for f in .zshrc .bashrc .profile; do
+  if [ ! -e "/data/workspace/${f}" ]; then
+    install -m 0644 -o "${DSH_UID}" -g "${DSH_GID}" \
+      "/etc/skel/${f}" "/data/workspace/${f}" 2>/dev/null \
+      || echo "[entrypoint] WARN: could not seed /data/workspace/${f}" >&2
+  fi
+done
+
 # --- 预检: 检出是挂载的, 从不烧进镜像 -------------------------------
 # 必须已含安装+构建产物(node_modules 来自 pnpm install, apps/web/dist 来自
 # pnpm run build), 由 builder 容器(`task build`)在宿主机产出。除 web 产物外
