@@ -26,7 +26,7 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 # PNPM_HOME 指向 dsh 的 HOME(运行时挂载, 构建期不存在也无害): 'pnpm add -g'
 # 开箱即用, 免跑 'pnpm setup' - 其在 npm 安装布局下有 bug(误打包 /usr/local/bin)。
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/data/workspace/.local/share/pnpm/bin \
+  PATH=/data/workspace/.local/bin:/data/workspace/.local/share/pnpm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   PNPM_HOME=/data/workspace/.local/share/pnpm \
   DSH_HOME=/data/dsh-home \
   XDG_CACHE_HOME=/tmp/xdg_cache
@@ -38,13 +38,16 @@ ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8 \
 #    'bat'->bat(二进制 batcat); fd/bat 软链出常用名, /usr/local/bin 在 PATH 首位。
 # ---------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  ca-certificates tzdata curl git gnupg xz-utils build-essential \
-  python3 python3-dev python3-pip python3-venv procps openssl unzip jq \
-  ripgrep wget less nginx bubblewrap sudo \
-  gh sqlite3 fd-find tree vim openssh-client zip fzf bat cmake \
-  net-tools psmisc iputils-ping \
+  ca-certificates tzdata curl git gnupg xz-utils build-essential vim \
+  procps openssl unzip jq ripgrep wget less nginx bubblewrap sudo \
+  net-tools psmisc iputils-ping tree file openssh-client zip fzf bat \
+  gh sqlite3 fd-find zsh zsh-autosuggestions zsh-syntax-highlighting \
+  cmake python3 python3-dev python3-pip python3-venv golang rustup \
+  libicu-dev openjdk-21-jdk-headless  openjdk-21-jre-headless \
+  docker-cli docker-buildx docker-compose \
   && ln -s /usr/bin/fdfind /usr/local/bin/fd \
   && ln -s /usr/bin/batcat /usr/local/bin/bat \
+  && ln -s /usr/bin/python3 /usr/bin/python \
   && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
