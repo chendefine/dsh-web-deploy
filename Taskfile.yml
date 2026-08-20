@@ -238,8 +238,10 @@ tasks:
       - task: image:runner
       - '{{.COMPOSE}} --profile build run --rm --no-deps builder'
 
+  # Internal: only `build` composes the builder image with the source build; it
+  # has no standalone documented use, so it stays out of the public task list.
   image:builder:
-    desc: Build the one-shot builder image
+    internal: true
     # dirs:base only: image builds need BUILDX_DIR but not the pnpm store, so they
     # must not inherit init (the clone) through dirs.
     deps: [dirs:base]
@@ -260,18 +262,6 @@ tasks:
       - >-
         {{.MODE_ENV}}
         sh {{.MODE_HELPER}} entry-clean
-
-  _legacy:clean:
-    desc: Remove containers of services deleted from compose.yaml (guarded by project label)
-    internal: true
-    cmds:
-      - sh {{.MODE_HELPER}} legacy-clean
-
-  _tls:refresh:
-    desc: Best-effort nginx reload inside a running tls container; never changes lifecycle
-    internal: true
-    cmds:
-      - sh {{.MODE_HELPER}} tls-refresh
 
   _dsh:reconcile:
     internal: true
@@ -320,30 +310,45 @@ tasks:
         if [ '{{.HTTPS_ENABLED}}' = true ]; then
           {{.MODE_COMPOSE}} --profile tls up -d --no-deps {{.EFFECTIVE_ARGS}} tls
         fi
-      - task: _tls:refresh
+      # Best-effort nginx reload inside a running tls container; never changes lifecycle.
+      - sh {{.MODE_HELPER}} tls-refresh
 
-  # Restart helpers for the aggregate `restart` task. They follow the same switch
-  # discipline as the reconcile tasks (a disabled block is skipped) but recreate the
-  # selected services with "up -d --force-recreate": plain "docker compose restart"
-  # reuses the old container instead of recreating it. MODE_COMPOSE is mandatory here —
-  # recreation rebuilds from the Compose model, which must include the mode overlay
-  # (published HTTP_PORT + dsh-http-entry alias), or the recreated entry container would
-  # come back without its published port. A selected block whose containers were never
-  # created is created by `up`; no container outside the selected block is ever removed.
+  # Shared reconcile tail of `up` and `update` (and indirectly dsh:up-style
+  # per-user flows): prune containers of services deleted from compose.yaml
+  # (project-label guarded), then converge every block selected by the switches.
+  # The caller's CLI_ARGS/UP_ARGS propagate through the task call and resolve to
+  # EFFECTIVE_ARGS exactly as they did when up/update spelled these calls inline.
+  _stack:reconcile:
+    internal: true
+    vars:
+      EFFECTIVE_ARGS: '{{ default .CLI_ARGS .UP_ARGS }}'
+    cmds:
+      - sh {{.MODE_HELPER}} legacy-clean
+      - task: _dsh:reconcile
+        vars:
+          UP_ARGS: '{{.EFFECTIVE_ARGS}}'
+      - task: _auth:reconcile
+        vars:
+          UP_ARGS: '{{.EFFECTIVE_ARGS}}'
+      - task: _tls:reconcile
+        vars:
+          UP_ARGS: '{{.EFFECTIVE_ARGS}}'
+
+  # Guarded auth restart helper shared by the aggregate `restart` task and the
+  # public `auth:restart` (whose precondition implies the guard). It recreates
+  # the selected services with "up -d --force-recreate": plain "docker compose
+  # restart" reuses the old container instead of recreating it. MODE_COMPOSE is
+  # mandatory here — recreation rebuilds from the Compose model, which must
+  # include the mode overlay (published HTTP_PORT + dsh-http-entry alias), or
+  # the recreated entry container would come back without its published port. A
+  # selected block whose containers were never created is created by `up`; no
+  # container outside the selected block is ever removed.
   _auth:restart:
     internal: true
     cmds:
       - |-
         if [ '{{.AUTH_ENABLED}}' = true ]; then
           {{.MODE_COMPOSE}} --profile auth up -d --no-deps --force-recreate authelia gateway
-        fi
-
-  _tls:restart:
-    internal: true
-    cmds:
-      - |-
-        if [ '{{.HTTPS_ENABLED}}' = true ]; then
-          {{.MODE_COMPOSE}} --profile tls up -d --no-deps --force-recreate tls
         fi
 
   # ----------------------------------------------------------------------- block tasks
@@ -420,12 +425,13 @@ tasks:
     preconditions:
       - sh: test '{{.AUTH_ENABLED}}' = true
         msg: 'AUTH_GATEWAY=false; set AUTH_GATEWAY=true before task auth:up'
-    vars:
-      EFFECTIVE_ARGS: '{{ default .CLI_ARGS .UP_ARGS }}'
     cmds:
+      # The precondition guarantees AUTH_GATEWAY=true, so _auth:reconcile takes
+      # its up branch (the rm -sf branch is unreachable) with the caller's
+      # CLI_ARGS propagated unchanged.
       - task: config:validate
       - task: _entry:conflict-clean
-      - '{{.MODE_COMPOSE}} --profile auth up -d --no-deps {{.EFFECTIVE_ARGS}} authelia gateway'
+      - task: _auth:reconcile
 
   auth:down:
     desc: Stop and remove Authelia and gateway; preserve auth data
@@ -438,8 +444,9 @@ tasks:
       - sh: test '{{.AUTH_ENABLED}}' = true
         msg: 'AUTH_GATEWAY=false; set AUTH_GATEWAY=true before task auth:restart'
     cmds:
-      # MODE_COMPOSE: recreation must keep the overlay's published HTTP_PORT on gateway.
-      - '{{.MODE_COMPOSE}} --profile auth up -d --no-deps --force-recreate authelia gateway'
+      # The precondition satisfies _auth:restart's guard; MODE_COMPOSE inside
+      # keeps the overlay's published HTTP_PORT on the recreated gateway.
+      - task: _auth:restart
 
   # Zero-downtime counterpart of auth:restart. No container is recreated and no process is
   # killed; it covers exactly the two config surfaces that can change at runtime:
@@ -510,21 +517,10 @@ tasks:
       - test -e '{{.REPO_DIR}}/node_modules'
       - sh: test -e '{{.REPO_DIR}}/apps/web/dist/index.html'
         msg: 'source artifacts are missing; run task build first'
-    vars:
-      EFFECTIVE_ARGS: '{{ default .CLI_ARGS .UP_ARGS }}'
     cmds:
       - task: config:validate
       - task: image:runner
-      - task: _legacy:clean
-      - task: _dsh:reconcile
-        vars:
-          UP_ARGS: '{{.EFFECTIVE_ARGS}}'
-      - task: _auth:reconcile
-        vars:
-          UP_ARGS: '{{.EFFECTIVE_ARGS}}'
-      - task: _tls:reconcile
-        vars:
-          UP_ARGS: '{{.EFFECTIVE_ARGS}}'
+      - task: _stack:reconcile
 
   # update is an up-family task and deliberately omits --force-recreate: plain "up -d"
   # convergence recreates exactly the services whose rebuilt image or changed config
@@ -537,27 +533,16 @@ tasks:
     cmds:
       - task: build
       - task: config:validate
-      - task: _legacy:clean
-      - task: _dsh:reconcile
-        vars:
-          UP_ARGS: '{{.CLI_ARGS}}'
-      - task: _auth:reconcile
-        vars:
-          UP_ARGS: '{{.CLI_ARGS}}'
-      - task: _tls:reconcile
-        vars:
-          UP_ARGS: '{{.CLI_ARGS}}'
+      - task: _stack:reconcile
 
   down:
     desc: Remove all runtime blocks and managed project resources; preserve host data
     cmds:
-      - task: tls:down
-      - task: auth:down
-      # CLI_ARGS is pinned so the aggregate task always removes every block even
-      # when invoked with arguments (per-user targeting is dsh:down-only).
-      - task: dsh:down
-        vars:
-          CLI_ARGS: ''
+      # ALL_PROFILES spans every block plus build, so this single command is a
+      # strict superset of the former per-block rm calls: it stops and removes
+      # every project container (builder included), drops the managed project
+      # networks, and --remove-orphans prunes containers of services deleted
+      # from compose.yaml (the legacy-clean equivalent). Host data stays.
       - '{{.COMPOSE}} {{.ALL_PROFILES}} down --remove-orphans'
 
   restart:
@@ -569,7 +554,12 @@ tasks:
         vars:
           CLI_ARGS: ''
       - task: _auth:restart
-      - task: _tls:restart
+      # tls:restart itself is always available; the aggregate recreates the tls
+      # block only when HTTPS_EXPORT selected it, hence the inline guard.
+      - |-
+        if [ '{{.HTTPS_ENABLED}}' = true ]; then
+          {{.MODE_COMPOSE}} --profile tls up -d --no-deps --force-recreate tls
+        fi
 
   logs:
     desc: Follow logs for the currently selected complete stack
@@ -614,13 +604,6 @@ tasks:
           echo "$match"
     cmds:
       - '{{.COMPOSE}} {{.ALL_PROFILES}} exec -u "{{.HOST_UID_VALUE}}:{{.HOST_GID_VALUE}}" -e HOME=/data/workspace {{.SERVICE}} bash'
-
-  hash:
-    desc: Generate an argon2id digest for authelia/users_database.yml
-    cmds:
-      - >-
-        {{.COMPOSE}} --profile auth run --rm --no-deps authelia
-        authelia crypto hash generate argon2 --password '{{.CLI_ARGS}}'
 
   # ------------------------------------------------------------------ user tasks
   # User management lives in scripts/user_admin.sh, which keeps three files in
