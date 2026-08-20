@@ -97,7 +97,9 @@ RUN groupadd --gid "${HOST_GID}" dsh \
 # ---------------------------------------------------------------------------
 # 7. 脚本: 入口(校验挂载检出、跑 'dsh web' + nginx、转发信号、任一退出即退)
 #    + 它 exec 的降权启动器。均为小 ./build context 里的真实文件 COPY 进镜像
-#    - 入口不在启动时写脚本。chmod 而非 COPY --chmod, 兼容任意 builder。
+#    - 唯一例外: /usr/local/bin/reboot(容器内自重启命令)由入口在每次启动时
+#    重写(见 docker-entrypoint.sh), 其余脚本不在启动时生成。chmod 而非
+#    COPY --chmod, 兼容任意 builder。
 # ---------------------------------------------------------------------------
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

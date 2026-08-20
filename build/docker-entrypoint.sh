@@ -67,12 +67,35 @@ for p in node_modules/.bin/tsx apps/cli/src/bin.ts apps/web/dist/index.html; do
   fi
 done
 
-# --- 非特权 'dsh web' 启动器 -----------------------------------------
-# 以 DSH_UID:DSH_GID、HOME=/data/workspace 运行。git safe.directory(宿主机
-# 属主的检出/工作区, "dubious ownership")已烧进镜像 /etc/gitconfig
-# (Dockerfile.runtime 步骤 8), 启动器不再写用户级配置。脚本 COPY 在
-# /usr/local/bin/dsh-run.sh(与 Dockerfile.builder 的 dsh-build.sh 同模式),
-# 不要在这里重新生成。
+# --- 容器内自重启命令: /usr/local/bin/reboot ---------------------------
+# 每次启动重写, 内容固定故幂等。compose 给每个实例 stamp 了 `restart:
+# unless-stopped`: PID 1 退出的瞬间, daemon 就把同一个容器对象(端口/挂载/
+# 别名不变)拉回来 - 所以容器内自重启只需让容器退出, 即对 PID 1 发一个
+# TERM。PID 1 是 docker-init(init: true), 它把 TERM 转发给本入口的 trap,
+# 优雅收尾 'dsh web' + nginx(卡死不理 TERM 的子进程由下方 watchdog 兜底)。
+# 脚本里经 sudo 是因为 task/agent 会话以非特权 dsh 运行, 而 PID 1 只收
+# root 的信号(镜像烧了 dsh 的 NOPASSWD sudo; root 会话里 sudo 直接放行,
+# 同一条命令两态通用)。这是 plain reboot 非 recreate: compose.yaml/镜像
+# 变更仍需宿主机上的 task dsh:restart。基础镜像无同名命令(无 systemd/
+# sysvinit), /usr/local/bin 在所有用户 PATH 首位, 无遮蔽冲突。
+cat > /usr/local/bin/reboot <<'EOF'
+#!/bin/sh
+# Reboot THIS container: TERM -> PID 1 (docker-init -> entrypoint trap) ->
+# graceful shutdown -> the daemon restart policy (unless-stopped) starts
+# the same container again.
+echo 'reboot: signaling PID 1; this shell dies when the container exits, the daemon brings it back'
+exec sudo -n kill -TERM 1
+EOF
+chmod 0755 /usr/local/bin/reboot
+# echo "[entrypoint] wrote /usr/local/bin/reboot (in-container self-reboot)"
+
+# --- 非特权 'dsh web' 启动 -------------------------------------------
+# 以 DSH_UID:DSH_GID、HOME=/data/workspace 运行, 直接 exec 镜像烧入的 dsh
+# CLI 包装器(与 Dockerfile.builder 的 dsh-build.sh 同 COPY 模式): 它 exec
+# 检出 node_modules 里的 tsx 跑 apps/cli/src/bin.ts, 与 package.json 的
+# 'dsh' 脚本等价, tsx 负责向真正的 CLI 进程转发 TERM/INT。git
+# safe.directory(宿主机属主的检出/工作区, "dubious ownership")已烧进镜像
+# /etc/gitconfig(Dockerfile.runtime 步骤 9), 启动不再写用户级配置。
 echo "[entrypoint] dsh web -> http://127.0.0.1:3080  (DSH_HOME=${DSH_HOME}, user ${DSH_UID}:${DSH_GID})"
 setpriv --reuid="${DSH_UID}" --regid="${DSH_GID}" --clear-groups \
   env HOME=/data/workspace /usr/local/bin/dsh web &
@@ -82,9 +105,22 @@ echo "[entrypoint] nginx :80 (http) -> 127.0.0.1:3080"
 nginx -g 'daemon off;' &
 nginx_pid=$!
 
+# 关停宽限(秒), 期满 TERM 升级 KILL。镜像 docker 默认停止宽限同为 10s。
+SHUTDOWN_GRACE="${SHUTDOWN_GRACE:-10}"
+kill_watchdog=""
+
+# TERM 的有界宽限后升级 KILL。daemon 的停止宽限 + SIGKILL 兜底只覆盖
+# daemon 主动停止(docker stop/restart); 容器自行退出路径 —— 任一子进程
+# 崩溃, 或容器内 `sudo kill -TERM 1` 自重启 —— 外部没有任何力量强制
+# 容器退出: 子进程若卡死不理 TERM, 入口会永远悬在 wait 上, 容器不退出,
+# daemon 的 restart policy(unless-stopped)也就永远不触发。watchdog 让
+# 关停有界: 先 TERM 优雅收尾, 宽限期后 KILL 强制兜底(容器退出时残留的
+# watchdog 子壳随 PID 命名空间一起被内核清掉, 无泄漏)。
 shutdown() {
   echo "[entrypoint] shutting down"
   kill "${dsh_pid}" "${nginx_pid}" 2>/dev/null || true
+  ( sleep "${SHUTDOWN_GRACE}" && kill -KILL "${dsh_pid}" "${nginx_pid}" 2>/dev/null ) &
+  kill_watchdog=$!
 }
 trap shutdown TERM INT QUIT
 
@@ -95,4 +131,5 @@ set -e
 
 shutdown
 wait "${dsh_pid}" "${nginx_pid}" 2>/dev/null || true
+kill "${kill_watchdog}" 2>/dev/null || true
 exit "${status}"

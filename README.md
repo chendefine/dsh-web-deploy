@@ -195,7 +195,7 @@ task user:list                              # 查看用户列表
 | `task tls:down`     | 删除内置 TLS 容器；保留证书                                                                                                                                                                                                                                                                                               |
 | `task tls:restart`  | 以 `up -d --force-recreate` 重建内置 TLS 容器；**不受 `HTTPS_EXPORT` 限制**，随时可用                                                                                                                                                                                                                                     |
 
-块级命令互相独立。若只启动下游块，上游缺失时看到 502 属于预期；上游出现后自动恢复。`restart` 系列以 `up -d --force-recreate` 强制重建所选容器（容器按当前 Compose 模型重建，端口/别名等配置会一并应用；未创建的所选容器会被直接创建），但从不删除所选范围之外的容器，也不做入口冲突清理——切换模式请用 `task up`。
+块级命令互相独立。若只启动下游块，上游缺失时看到 502 属于预期；上游出现后自动恢复。`restart` 系列以 `up -d --force-recreate` 强制重建所选容器（容器按当前 Compose 模型重建，端口/别名等配置会一并应用；未创建的所选容器会被直接创建），但从不删除所选范围之外的容器，也不做入口冲突清理——切换模式请用 `task up`。`restart`/`dsh:restart` 是 compose **客户端**编排的多步操作（先停旧容器再建新容器），在容器内部执行时客户端会随旧容器一起被杀死、新容器起不来；容器内重启自身无需任何 task——入口在每次启动时写好 `/usr/local/bin/reboot`，直接执行 `reboot` 即可：它对 PID 1 发 SIGTERM（docker-init 转发给入口优雅收尾 `dsh web` + nginx），容器退出后 daemon 的 restart policy（`unless-stopped`）自动拉回**同一个容器对象**（端口/挂载/别名不变；不重建，不应用 compose.yaml/镜像变更——那类变更请在宿主机用 `task dsh:restart`）。
 
 ### 单用户定向操作
 
