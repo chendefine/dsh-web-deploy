@@ -28,6 +28,10 @@ dotenv: ['.env']
 # container gets the current Compose model including the mode overlay's port/alias.
 # Restart never removes a container outside the selected blocks; switching the selection
 # itself still requires task up (restart does not run the entry-conflict cleanup).
+# up-family tasks (up/dsh:up/auth:up/tls:up/update) never pass --force-recreate: compose
+# "up -d" convergence already recreates every service whose image ID or configuration
+# changed (a rebuilt dsh-runtime image is picked up automatically), so forced recreation
+# stays exclusive to the restart family.
 #
 # dsh:up/down/restart accept an optional per-user target after "--" (plain or dsh- prefixed
 # instance name, resolved and validated by scripts/compose_mode.sh target-service): they
@@ -151,6 +155,16 @@ vars:
 
 env:
   BUILDX_CONFIG: '{{ coalesce .BUILDX_CONFIG .BUILDX_DIR }}'
+  # buildx >= 0.13 attaches provenance/attestation manifests by default: the image is
+  # wrapped in an OCI index whose digest changes between IDENTICAL builds, because the
+  # attestation embeds build start/end timestamps and is regenerated whenever the
+  # daemon's build-cache record is garbage-collected. docker images then reports a new
+  # image ID after every build and `up -d` recreates the container even though the
+  # image manifest/config are byte-identical. Disabling default attestations keeps the
+  # tag on the content-addressed manifest, so unchanged builds keep their ID and up
+  # converges without recreating containers. (compose 2.26 has no --provenance flag,
+  # so the buildx env var is the only lever that reaches compose build.)
+  BUILDX_NO_DEFAULT_ATTESTATIONS: '1'
   # A configured network name means "join this existing external network" unless the caller
   # explicitly supplies the corresponding *_EXTERNAL value.
   BUILDER_NETWORK_EXTERNAL:
@@ -512,21 +526,27 @@ tasks:
         vars:
           UP_ARGS: '{{.EFFECTIVE_ARGS}}'
 
+  # update is an up-family task and deliberately omits --force-recreate: plain "up -d"
+  # convergence recreates exactly the services whose rebuilt image or changed config
+  # requires it (a new dsh-runtime image ID triggers recreation), while untouched
+  # stock-image services (authelia/gateway/tls) keep running and keep their Authelia
+  # sessions. Forced full recreation belongs to the restart family; callers can still
+  # opt in explicitly with "task update -- --force-recreate" (CLI_ARGS propagates).
   update:
-    desc: Rebuild source artifacts/images, then recreate the selected stack
+    desc: Rebuild source artifacts/images, then reconcile the selected stack (recreates only services whose image/config changed)
     cmds:
       - task: build
       - task: config:validate
       - task: _legacy:clean
       - task: _dsh:reconcile
         vars:
-          UP_ARGS: '--force-recreate {{.CLI_ARGS}}'
+          UP_ARGS: '{{.CLI_ARGS}}'
       - task: _auth:reconcile
         vars:
-          UP_ARGS: '--force-recreate {{.CLI_ARGS}}'
+          UP_ARGS: '{{.CLI_ARGS}}'
       - task: _tls:reconcile
         vars:
-          UP_ARGS: '--force-recreate {{.CLI_ARGS}}'
+          UP_ARGS: '{{.CLI_ARGS}}'
 
   down:
     desc: Remove all runtime blocks and managed project resources; preserve host data

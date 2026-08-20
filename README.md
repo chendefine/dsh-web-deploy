@@ -128,7 +128,7 @@ task up
 task update
 ```
 
-重建源码产物和镜像，再强制重建当前目标模式（`HTTPS_EXPORT=false` 时不重建也不移除已有 TLS 容器，仅对运行中的容器做 best-effort reload）。挂载的数据目录不会被删除。
+重建源码产物和镜像，再以 `task up` 同款的收敛方式更新当前目标模式：只有镜像或配置发生变化的服务会被重建（重建后的 runtime 镜像会被自动采用），未变化的服务（如 authelia/gateway）保持运行、Authelia 会话不受影响（`HTTPS_EXPORT=false` 时不启动也不移除已有 TLS 容器，仅对运行中的容器做 best-effort reload）。挂载的数据目录不会被删除。需要强制重建全部所选容器时使用 `task restart`，或 `task update -- --force-recreate` 显式传入。
 
 ### 多用户基本操作（认证模式）
 
@@ -149,7 +149,7 @@ task user:list                              # 查看用户列表
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `task up`                                     | 收敛并启动两个开关选中的完整模式                                                                                                                                                                                                |
 | `task down`                                   | 清除 dsh/auth/tls 的全部运行容器及项目资源，保留挂载数据                                                                                                                                                                        |
-| `task update`                                 | 重建源码产物和镜像，再强制重建当前目标模式（`HTTPS_EXPORT=false` 时不重建也不移除已有 TLS 容器，仅对运行中的容器做 best-effort reload）                                                                                         |
+| `task update`                                 | 重建源码产物和镜像，再以收敛方式更新当前目标模式（仅重建镜像/配置变化的服务，未变化的服务保持运行；需强制重建用 `task restart` 或 `task update -- --force-recreate`；`HTTPS_EXPORT=false` 时不启动也不移除已有 TLS 容器，仅对运行中的容器做 best-effort reload）                |
 | `task build`                                  | 构建 builder/runtime 镜像和源码产物，不启动运行服务                                                                                                                                                                             |
 | `task config:validate`                        | 校验布尔值、端口、合并模型不变量，并输出所选模式与 HTTP 入口                                                                                                                                                                    |
 | `task config:show`                            | 展示当前模式渲染后的 Compose 模型                                                                                                                                                                                               |
