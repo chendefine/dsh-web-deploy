@@ -1,14 +1,17 @@
 #!/bin/sh
 # Manage dsh deployment users: create | reset-password | remove | list.
 #
-# One authenticated user spans four configuration files that must stay in sync
+# One authenticated user spans three configuration files that must stay in sync
 # (see README「用户管理」):
-#   authelia/users_database.yml   argon2id credentials
-#   authelia/configuration.yml    ACL subject "- \"user:<name>\""
+#   authelia/users_database.yml   argon2id credentials + groups (must contain
+#                                 "dsh": configuration.yml's ACL rule grants by
+#                                 "group:dsh"; group membership hot-reloads via
+#                                 authentication_backend.file.watch, so create/
+#                                 remove never touches configuration.yml)
 #   compose.yaml                  dsh-<name> runtime instance; declaration order
 #                                 is contractual: the first service is the
 #                                 no-auth single instance (primary)
-#   nginx/gateway.conf.template   upstream dsh_<name> + $dsh_user routing map
+#   nginx/gateway/default.conf.template   upstream dsh_<name> + $dsh_user routing map
 #
 # Inputs arrive via the environment (set by the Taskfile tasks; exporting them
 # by hand works too):
@@ -32,7 +35,7 @@ ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd) || exit 2
 USERS_DB="$ROOT/authelia/users_database.yml"
 AUTH_CONF="$ROOT/authelia/configuration.yml"
 COMPOSE_FILE="$ROOT/compose.yaml"
-GATEWAY_CONF="$ROOT/nginx/gateway.conf.template"
+GATEWAY_CONF="$ROOT/nginx/gateway/default.conf.template"
 MODE_HELPER="$SCRIPT_DIR/compose_mode.sh"
 
 die() {
@@ -119,10 +122,6 @@ user_in_db() {
   awk -v n="$1" '$0 == "  " n ":" { found = 1 } END { exit !found }' "$USERS_DB"
 }
 
-user_has_subject() {
-  grep -q "^[[:space:]]*- \"user:$1\"$" "$AUTH_CONF"
-}
-
 user_has_service() {
   sh "$MODE_HELPER" services | grep -qxF "dsh-$1"
 }
@@ -151,6 +150,53 @@ awk_edit() {
 
 require_anchor() {
   grep -Eq "$2" "$1" || die "anchor not found in $1: $2 (file format changed?)"
+}
+
+# Re-render the gateway template inside the running container and graceful-reload
+# nginx (SIGHUP): the master stays up, old workers keep serving established
+# SSE/WS connections, new workers use the updated user->backend route table.
+# Called after create/remove touch nginx/gateway/default.conf.template so routing changes
+# land without recreating the gateway container. Safe even when the target
+# dsh-<name> instance is not (yet) running: its upstream server uses `resolve`,
+# so nginx -t never fails on a currently unresolvable name (traffic for that
+# user just 502s until task dsh:up -- <name> starts the instance).
+reload_gateway() {
+  if [ "$(docker inspect dsh-base-gateway --format '{{.State.Running}}' 2>/dev/null)" != true ]; then
+    echo "note: gateway not running; template changes apply on the next task auth:up"
+    return 0
+  fi
+  if ! docker exec dsh-base-gateway sh -c \
+      'NGINX_ENTRYPOINT_QUIET_LOGS=1 /docker-entrypoint.d/20-envsubst-on-templates.sh && nginx -t && nginx -s reload'; then
+    die "gateway reload failed; fix nginx/gateway/default.conf.template then retry: task auth:reload"
+  fi
+  echo "gateway route table reloaded (graceful nginx reload, no restart)"
+}
+
+# Start one user's dsh instance (the task dsh:up -- <name> equivalent, mode-aware
+# through scripts/compose_mode.sh run — the Taskfile user:create task exports the
+# MODE_ENV values this needs) and wait until its inner nginx answers, so the
+# gateway reload that follows resolves dsh-<name> immediately and the new user's
+# first login cannot hit a 502 from an unstarted/unresolved upstream.
+start_instance() {
+  _name=$1
+  _svc="dsh-$_name"
+  echo "starting instance $_svc (container dsh-web-$_name)..."
+  if ! sh "$MODE_HELPER" run --profile dsh up -d --no-deps "$_svc"; then
+    echo "error: failed to start $_svc (config changes are kept)" >&2
+    echo "hint: start it manually with: task dsh:up -- $_name" >&2
+    return 0
+  fi
+  _i=0
+  while [ "$_i" -lt 30 ]; do
+    if docker exec "dsh-web-$_name" curl -fsS -o /dev/null --max-time 2 \
+        http://127.0.0.1:80/ 2>/dev/null; then
+      echo "instance dsh-web-$_name is up and serving"
+      return 0
+    fi
+    _i=$((_i + 1))
+    sleep 1
+  done
+  echo "note: dsh-web-$_name still booting after 30s; the very first login may briefly 502" >&2
 }
 
 # Syntax-check compose.yaml after structural edits.
@@ -183,7 +229,6 @@ cmd_create() {
     && die "user '$name' already has a gateway upstream"
 
   # Verify every edit anchor before touching any file
-  require_anchor "$AUTH_CONF" '^[[:space:]]*- "user:'
   require_anchor "$COMPOSE_FILE" '^  # -+ dsh runtime image'
   require_anchor "$GATEWAY_CONF" '^upstream dsh_denied '
   require_anchor "$GATEWAY_CONF" '^    default[[:space:]]+dsh_denied;'
@@ -196,7 +241,8 @@ cmd_create() {
   esac
   domain=${DSH_DOMAIN:-harness.deepseek.com}
 
-  # 1. users_database.yml — append at EOF (the only top-level map is `users:`)
+  # 1. users_database.yml — append at EOF (the only top-level map is `users:`).
+  #    The "dsh" group is what configuration.yml's ACL rule matches; it hot-reloads.
   [ -n "$(tail -c 1 "$USERS_DB")" ] && printf '\n' >> "$USERS_DB"
   {
     printf '  %s:\n' "$name"
@@ -204,20 +250,10 @@ cmd_create() {
     printf '    password: "%s"\n' "$hash"
     printf '    email: %s@%s\n' "$name" "$domain"
     printf '    groups:\n'
-    printf '      - %s\n' "$name"
-    printf '      - everyone\n'
+    printf '      - dsh\n'
   } >> "$USERS_DB"
 
-  # 2. configuration.yml — ACL subject after the last existing "user:*" entry
-  require_anchor "$AUTH_CONF" '^[[:space:]]*- "user:'
-  _sub_ln=$(awk '/^[[:space:]]*- "user:/ { n = NR } END { print n }' "$AUTH_CONF")
-  _sub_ind=$(sed -n "${_sub_ln}p" "$AUTH_CONF" | sed 's/- "user:.*//')
-  awk_edit "$AUTH_CONF" -v ln="$_sub_ln" -v entry="${_sub_ind}- \"user:$name\"" '
-    { print }
-    NR == ln { print entry }
-  '
-
-  # 3. compose.yaml — instance block right before the build-only pointer banner
+  # 2. compose.yaml — instance block right before the build-only pointer banner
   require_anchor "$COMPOSE_FILE" '^  # -+ dsh runtime image'
   awk_edit "$COMPOSE_FILE" -v name="$name" '
     !done && /^  # -+ dsh runtime image/ {
@@ -236,7 +272,7 @@ cmd_create() {
   '
   compose_check
 
-  # 4. gateway template — upstream + $dsh_user routing map entry
+  # 3. gateway template — upstream + $dsh_user routing map entry
   require_anchor "$GATEWAY_CONF" '^upstream dsh_denied '
   awk_edit "$GATEWAY_CONF" -v name="$name" '
     !done && /^upstream dsh_denied / {
@@ -259,12 +295,22 @@ cmd_create() {
   # post-conditions
   user_in_db "$name" || die "post-check failed: $USERS_DB"
   user_has_service "$name" || die "post-check failed: compose.yaml"
-  user_has_subject "$name" || die "post-check failed: configuration.yml"
-  user_has_upstream "$name" || die "post-check failed: gateway.conf.template"
+  user_has_upstream "$name" || die "post-check failed: gateway/default.conf.template"
+  awk -v n="$name" '$0 == "  " n ":" { inblock = 1 }
+    inblock && /^    groups:/ { grp = 1 }
+    grp && /^      - dsh$/ { ok = 1 }
+    END { exit !ok }' "$USERS_DB" \
+    || die "post-check failed: $name is missing the dsh group (ACL grants by group:dsh)"
 
-  echo "user '$name' created (authelia + ACL + dsh-$name + gateway route)."
-  echo "apply with: task auth:restart && task dsh:up -- $name   (starts only the new instance)"
-  echo "            or: task up   (reconciles the whole selected stack)"
+  # Order matters: start the instance FIRST (and wait for it to serve), THEN
+  # reload the gateway - nginx resolves dsh-<name> during the reload, so the
+  # route becomes usable the moment it appears, with no resolve-cache 502 window.
+  start_instance "$name"
+  reload_gateway
+
+  echo "user '$name' created and ready (authelia users+groups + dsh-$name + gateway route)."
+  echo "zero restart: the users/groups entry hot-reloads via watch: true, the instance is"
+  echo "up and the gateway route is live - '$name' can log in right away."
 }
 
 cmd_reset() {
@@ -289,7 +335,11 @@ cmd_reset() {
   grep -qF "password: \"$hash\"" "$USERS_DB" || die "password replacement failed for '$name'"
 
   echo "password for '$name' updated."
-  echo "apply with: task auth:restart   (authelia must reload the users file)"
+  if grep -Eq '^[[:space:]]*watch:[[:space:]]*true' "$AUTH_CONF"; then
+    echo "no action needed - authelia hot-reloads the users file (watch: true)"
+  else
+    echo "apply with: task auth:restart   (authelia must reload the users file)"
+  fi
 }
 
 cmd_remove() {
@@ -334,14 +384,7 @@ cmd_remove() {
     { print }
   '
 
-  # 2. configuration.yml — drop the ACL subject line
-  _sub_re='^[[:space:]]*- "user:'"$name"'"$'
-  awk_edit "$AUTH_CONF" -v re="$_sub_re" '
-    $0 ~ re { next }
-    { print }
-  '
-
-  # 3. compose.yaml — drop the instance banner + block, collapse blank runs
+  # 2. compose.yaml — drop the instance banner + block, collapse blank runs
   _banner_re='^  # -+ dsh runtime instance: '"$name"'$'
   awk_edit "$COMPOSE_FILE" -v banner="$_banner_re" -v svc="  dsh-$name:" '
     !del_banner && $0 ~ banner { del_banner = 1; next }
@@ -358,7 +401,7 @@ cmd_remove() {
   '
   compose_check
 
-  # 4. gateway template — drop the upstream and the routing map entry
+  # 3. gateway template — drop the upstream and the routing map entry
   _up_re='^upstream dsh_'"$name"' '
   _map_re='^[[:space:]]*'"$name"'[[:space:]]+dsh_'"$name"';[[:space:]]*$'
   awk_edit "$GATEWAY_CONF" -v up="$_up_re" -v map="$_map_re" '
@@ -369,12 +412,15 @@ cmd_remove() {
   # post-conditions
   user_in_db "$name" && die "post-check failed: users_database.yml still contains $name"
   user_has_service "$name" && die "post-check failed: compose.yaml still contains dsh-$name"
-  user_has_subject "$name" && die "post-check failed: configuration.yml still contains user:$name"
-  user_has_upstream "$name" && die "post-check failed: gateway.conf.template still contains dsh_$name"
+  user_has_upstream "$name" && die "post-check failed: gateway/default.conf.template still contains dsh_$name"
 
-  echo "user '$name' removed from authelia, ACL, compose.yaml and the gateway."
+  reload_gateway
+
+  echo "user '$name' removed from the users database, compose.yaml and the gateway."
   echo "data preserved: dsh-home/$name and workspace/$name were NOT deleted."
-  echo "apply with: task auth:restart   (drops the route; other instances keep running)"
+  echo "no action needed: new logins are blocked immediately; authelia refreshes session"
+  echo "profiles against the users database (session.refresh_interval, default 5m), so an"
+  echo "existing session of '$name' self-invalidates within that window (task auth:restart drops it at once)"
   if [ "$_was_primary" = 1 ]; then
     echo "primary moved to '$_new_primary': also run task up" \
       "(AUTH_GATEWAY=false must republish HTTP_PORT on the new primary)"

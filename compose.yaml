@@ -73,7 +73,11 @@ services:
       # leak that port into the HTTPS redirect chain (rd / safe-redirection).
       HTTPS_PORT: ${HTTPS_PORT:-443}
     volumes:
-      - ./nginx/gateway.conf.template:/etc/nginx/templates/default.conf.template:ro
+      # 目录挂载(而非单文件): 单文件 bind mount 绑定创建容器那一刻的 inode, 宿主机上
+      # mv/git checkout/vim 等替换 inode 的编辑会让容器永远看到旧文件(user:create/
+      # user:remove 的模板改写与 task auth:reload 因此会渲染旧内容)。目录挂载始终
+      # 跟随目录内的当前文件, 容器内重渲染 + nginx -s reload 总能拿到最新模板。
+      - ./nginx/gateway:/etc/nginx/templates:ro
     healthcheck:
       test: [ "CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz" ]
       interval: 30s

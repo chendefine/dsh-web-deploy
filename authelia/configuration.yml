@@ -45,16 +45,23 @@ authentication_backend:
     disable: true
   file:
     path: /config/users_database.yml
+    # 热载用户库: Authelia 以 fsnotify 监听该文件所在目录, users_database.yml 一有
+    # 写入/替换即在进程内重载(0.5s 去抖冷却), 改密码/增删用户条目无需重启 authelia,
+    # 进程与内存会话全部保留。仅覆盖用户库本身 - configuration.yml 的 ACL 等配置
+    # 仍需重启生效(Authelia 上游不支持配置级的 SIGHUP 重载)。
+    watch: true
 
-# 默认拒绝，仅允许明确列出的用户。增加多用户实例时，还需同步用户库、gateway
-# 路由映射与 compose 中的 dsh runtime 实例；完整步骤见 README「用户管理」。
+# 默认拒绝，仅允许 dsh 组成员。ACL 按组匹配而非逐用户 subject：新用户的组归属
+# 写在 users_database.yml 的 groups（随 watch: true 热载），因此 user:create /
+# user:remove 不再触碰本文件，增删用户零重启、既有会话全部保留。本文件自身
+# （如改动这条规则）仍需 task auth:restart 才生效。
 access_control:
   default_policy: deny
   rules:
     - domain: {{ env "DSH_DOMAIN" }}
       policy: one_factor
       subject:
-        - "user:user"
+        - "group:dsh"
 
 notifier:
   filesystem:

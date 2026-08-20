@@ -427,6 +427,38 @@ tasks:
       # MODE_COMPOSE: recreation must keep the overlay's published HTTP_PORT on gateway.
       - '{{.MODE_COMPOSE}} --profile auth up -d --no-deps --force-recreate authelia gateway'
 
+  # Zero-downtime counterpart of auth:restart. No container is recreated and no process is
+  # killed; it covers exactly the two config surfaces that can change at runtime:
+  #   gateway  - the nginx entry re-renders the envsubst template (mounted ro under
+  #              /etc/nginx/templates) into /etc/nginx/conf.d, then graceful-reloads with
+  #              SIGHUP ("nginx -s reload"): the master stays, old workers keep serving
+  #              established SSE/WS connections until they end, new workers use the new
+  #              user->backend map. "nginx -t" gates the reload, so a broken template
+  #              fails without touching the running config.
+  #   authelia - has no config-level reload at all (upstream never merged SIGHUP config
+  #              reload), but authentication_backend.file.watch=true makes the users
+  #              database hot-reload on every write (including groups membership, which
+  #              is what the group:dsh ACL rule matches); login-data changes need no
+  #              action. Editing configuration.yml itself (e.g. the ACL rule) still
+  #              requires auth:restart.
+  auth:reload:
+    desc: Graceful reload without recreating containers (gateway nginx reload; authelia users file is auto-watched)
+    preconditions:
+      - sh: test '{{.AUTH_ENABLED}}' = true
+        msg: 'AUTH_GATEWAY=false; set AUTH_GATEWAY=true before task auth:reload'
+    cmds:
+      - |-
+        if ! docker exec dsh-base-gateway sh -c '/docker-entrypoint.d/20-envsubst-on-templates.sh && nginx -t && nginx -s reload'; then
+          echo 'error: gateway reload failed (is the gateway container dsh-base-gateway running? use task auth:up)' >&2
+          exit 1
+        fi
+      - |-
+        if docker logs dsh-base-authelia 2>&1 | grep -q 'Watching file for changes'; then
+          echo 'authelia: users-file watcher active - users_database.yml changes hot-reload automatically (editing configuration.yml itself still needs task auth:restart)'
+        else
+          echo 'authelia: users-file watcher NOT active - watch: true needs one task auth:restart to take effect' >&2
+        fi
+
   auth:logs:
     desc: Follow authentication block logs
     cmds:
@@ -571,10 +603,11 @@ tasks:
         authelia crypto hash generate argon2 --password '{{.CLI_ARGS}}'
 
   # ------------------------------------------------------------------ user tasks
-  # User management lives in scripts/user_admin.sh, which keeps four files in
-  # sync for one user: authelia/users_database.yml, authelia/configuration.yml
-  # (ACL subject), compose.yaml (dsh-<name> instance) and
-  # nginx/gateway.conf.template (upstream + routing map). Passwords travel via
+  # User management lives in scripts/user_admin.sh, which keeps three files in
+  # sync for one user: authelia/users_database.yml (credentials + the "dsh"
+  # group that configuration.yml's ACL rule matches, hot-reloaded via watch),
+  # compose.yaml (dsh-<name> instance) and nginx/gateway/default.conf.template
+  # (upstream + routing map). Passwords travel via
   # task env (never re-parsed by a shell); positional arguments need "--":
   #   task user:create -- <name> <password>
   # and whitespace passwords use the NAME=/PASSWORD= variable form instead.
@@ -585,6 +618,14 @@ tasks:
       DSH_USER_ARGS: '{{.CLI_ARGS}}'
       DSH_USER_NAME: '{{ default "" .NAME }}'
       DSH_USER_PASSWORD: '{{ default "" .PASSWORD }}'
+      # MODE_ENV mirror: user_admin.sh starts the new dsh-<name> instance itself
+      # (mode-aware via scripts/compose_mode.sh run) so a created user can log in
+      # immediately; these must match what dsh:up would pass.
+      AUTH_GATEWAY: '{{.AUTH_ENABLED}}'
+      HTTP_PORT: '{{.HTTP_PORT_VALUE}}'
+      HTTPS_PORT: '{{.HTTPS_PORT_VALUE}}'
+      HOST_UID: '{{.HOST_UID_VALUE}}'
+      HOST_GID: '{{.HOST_GID_VALUE}}'
     cmds:
       - sh '{{.ROOT_DIR}}/scripts/user_admin.sh' create
 

@@ -159,7 +159,7 @@ task user:list                              # 查看用户列表
 | `task restart`                                | 以 `up -d --force-recreate` 重建两个开关选中的完整栈：dsh 实例 + `AUTH_GATEWAY=true` 时的 auth 块 + `HTTPS_EXPORT=true` 时的 tls 块；未创建的所选块会被直接创建（模式切换仍请用 `task up`，restart 不清理与新模式冲突的旧容器） |
 | `task shell`                                  | 无认证模式默认进入第一个实例；认证模式使用 `task shell -- user`                                                                                                                                                                 |
 | `task hash -- '口令'`                         | 生成 Authelia argon2id 密码摘要                                                                                                                                                                                                 |
-| `task user:create -- <name> <密码>`           | 创建用户：同步 Authelia 用户库/ACL、compose 实例、gateway 路由并创建数据目录                                                                                                                                                    |
+| `task user:create -- <name> <密码>`           | 创建用户：同步 Authelia 用户库（含 dsh 组）、compose 实例、gateway 路由，创建数据目录，**自动启动新实例并优雅 reload gateway**；全程零重启，创建完即可登录                     |
 | `task user:reset_password -- <name> <新密码>` | 重置用户密码（重新生成 argon2id 摘要）                                                                                                                                                                                          |
 | `task user:remove -- <name>`                  | 删除用户全部配置与运行容器；**保留** `dsh-home/<name>`、`workspace/<name>`                                                                                                                                                      |
 | `task user:list`                              | 列出用户（标注 primary 实例）                                                                                                                                                                                                   |
@@ -167,17 +167,18 @@ task user:list                              # 查看用户列表
 
 ### 块级命令
 
-| 命令                | 作用                                                                                                                                                                                           |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `task dsh:up`       | 启动选中的 dsh 块：`AUTH_GATEWAY=false` 只启动第一个实例并直接发布 `HTTP_PORT`；`true` 启动全部实例（无宿主机端口）。可指定单个用户：`task dsh:up -- user1 [--force-recreate 等 compose 参数]` |
-| `task dsh:down`     | 删除全部 dsh 实例及旧版遗留容器；保留宿主机数据。可指定单个用户：`task dsh:down -- user1` 只删除该实例（同时跳过遗留容器清理）                                                                 |
-| `task dsh:restart`  | 以 `up -d --force-recreate` 重建选中的 dsh 实例（`AUTH_GATEWAY=false` 只重建第一个实例，其余实例不动）。可指定单个用户：`task dsh:restart -- user1`                                            |
-| `task auth:up`      | 启动 Authelia/gateway，`HTTP_PORT` 直接发布在 gateway；要求 `AUTH_GATEWAY=true`                                                                                                                |
-| `task auth:down`    | 删除 Authelia、gateway；保留认证数据                                                                                                                                                           |
-| `task auth:restart` | 以 `up -d --force-recreate` 重建 Authelia/gateway；要求 `AUTH_GATEWAY=true`（会使 Authelia 内存会话失效，用户需重新登录）                                                                      |
-| `task tls:up`       | 启动内置 TLS；**不受 `HTTPS_EXPORT` 限制**，随时可用                                                                                                                                           |
-| `task tls:down`     | 删除内置 TLS 容器；保留证书                                                                                                                                                                    |
-| `task tls:restart`  | 以 `up -d --force-recreate` 重建内置 TLS 容器；**不受 `HTTPS_EXPORT` 限制**，随时可用                                                                                                          |
+| 命令                | 作用                                                                                                                                                                                                                                                                                                                      |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `task dsh:up`       | 启动选中的 dsh 块：`AUTH_GATEWAY=false` 只启动第一个实例并直接发布 `HTTP_PORT`；`true` 启动全部实例（无宿主机端口）。可指定单个用户：`task dsh:up -- user1 [--force-recreate 等 compose 参数]`                                                                                                                            |
+| `task dsh:down`     | 删除全部 dsh 实例及旧版遗留容器；保留宿主机数据。可指定单个用户：`task dsh:down -- user1` 只删除该实例（同时跳过遗留容器清理）                                                                                                                                                                                            |
+| `task dsh:restart`  | 以 `up -d --force-recreate` 重建选中的 dsh 实例（`AUTH_GATEWAY=false` 只重建第一个实例，其余实例不动）。可指定单个用户：`task dsh:restart -- user1`                                                                                                                                                                       |
+| `task auth:up`      | 启动 Authelia/gateway，`HTTP_PORT` 直接发布在 gateway；要求 `AUTH_GATEWAY=true`                                                                                                                                                                                                                                           |
+| `task auth:down`    | 删除 Authelia、gateway；保留认证数据                                                                                                                                                                                                                                                                                      |
+| `task auth:restart` | 以 `up -d --force-recreate` 重建 Authelia/gateway；要求 `AUTH_GATEWAY=true`（会使 Authelia 内存会话失效，用户需重新登录）                                                                                                                                                                                                 |
+| `task auth:reload`  | 零中断热加载，**不重建容器、不重启进程**：gateway 在容器内重渲染路由模板并 `nginx -s reload`（master 不退，既有 SSE/WS 长连接由旧 worker 继续服务至自然结束）；Authelia 用户库由 `watch: true` 自动热载，无需任何操作。适用于用户口令/用户库条目与 gateway 路由变更；`configuration.yml`（ACL 等）变更仍需 `auth:restart` |
+| `task tls:up`       | 启动内置 TLS；**不受 `HTTPS_EXPORT` 限制**，随时可用                                                                                                                                                                                                                                                                      |
+| `task tls:down`     | 删除内置 TLS 容器；保留证书                                                                                                                                                                                                                                                                                               |
+| `task tls:restart`  | 以 `up -d --force-recreate` 重建内置 TLS 容器；**不受 `HTTPS_EXPORT` 限制**，随时可用                                                                                                                                                                                                                                     |
 
 块级命令互相独立。若只启动下游块，上游缺失时看到 502 属于预期；上游出现后自动恢复。`restart` 系列以 `up -d --force-recreate` 强制重建所选容器（容器按当前 Compose 模型重建，端口/别名等配置会一并应用；未创建的所选容器会被直接创建），但从不删除所选范围之外的容器，也不做入口冲突清理——切换模式请用 `task up`。
 
@@ -329,7 +330,7 @@ task user:remove -- user1                   # 删除 user1 配置（保留 works
 - 用户名限 `[a-z][a-z0-9_-]{0,30}`；保留字 `runtime`、`single`、`http`、`auth-http` 不可用（会与 compose 服务/遗留容器名冲突）；
 - `user:create`/`user:remove` 均拒绝重复/不存在的用户；仅当实例是**最后一个** dsh 实例时禁止删除（primary 即 `compose.yaml` 中第一个 `dsh-*` 服务，`AUTH_GATEWAY=false` 模式靠它发布 `HTTP_PORT`）。删除 primary 时若还有其他实例，声明顺序中的下一个服务自动接任 primary，此时需再执行 `task up` 重新发布端口；
 - 单个用户的实例可定向启停/重启：`task dsh:up|dsh:down|dsh:restart -- <name>`，不影响其他用户（见「单用户定向操作」）；
-- 配置变更后应用：`task auth:restart`（authelia/gateway 重启后才会重读用户库与路由模板）。新建用户后只需补启该用户的实例：`task dsh:up -- <name>`；需要全量收敛时用 `task up`（`user:remove` 会先自行删除该实例的运行容器，其他实例不受影响）；
+- 配置变更后应用：**用户库（`users_database.yml`）变更无需任何操作**——authelia 开启了 `watch: true`，文件一有变动（含 groups 组归属）即在进程内热载，会话与进程保留。gateway 路由模板变更用零中断的 `task auth:reload`。`user:create` 全自动收尾：**启动新实例 → 等其就绪 → 优雅 reload gateway**（reload 时实例已在，DNS 立即解析，无 502 窗口），ACL 按 `group:dsh` 组匹配、不触碰 `configuration.yml`——**创建完即可登录，全程零重启**（`auth:reload` 无需手动跑）。`user:remove` 会自动删容器并 reload gateway。`configuration.yml` 自身（ACL 规则等）变更仍需 `task auth:restart`（authelia 上游不支持配置级热载）。需要全量收敛时用 `task up`；
 - `user:remove` 删除四处配置与容器，但**不删除** `dsh-home/<name>` 与 `workspace/<name>`；确需清除数据请手动删除目录；
 - 安全提示：口令会出现在 shell 历史与 `docker inspect` 的一次性 run 命令中，请注意清理或改用变量形式。
 
@@ -343,23 +344,22 @@ task user:remove -- user1                   # 删除 user1 配置（保留 works
 
 ```bash
 task user:reset_password -- user '新的强口令'
-task auth:restart
+# 无需重启: watch: true 让 authelia 自动热载用户库, 立即生效
 ```
 
 同一浏览器 profile 通常只有一份同域 SSO 会话；并行测试多个账号应使用不同浏览器 profile 或隐私窗口。
 
-### 一个用户对应四处配置
+### 一个用户对应三处配置
 
-每个认证用户有独立 DSH_HOME/workspace，并在四处配置中各有一条记录；`task user:create` / `task user:remove`（实现于 `scripts/user_admin.sh`）自动保持同步：
+每个认证用户有独立 DSH_HOME/workspace，并在三处配置中各有一条记录；`task user:create` / `task user:remove`（实现于 `scripts/user_admin.sh`）自动保持同步。**访问授权按组而非逐用户**：`authelia/configuration.yml` 的 ACL 规则写死为 `subject: ["group:dsh"]`，用户的组归属（`groups: [dsh]`）放在用户库里、随 `watch: true` 热载——因此增删用户**不触碰** `configuration.yml`，也无需重启 authelia：
 
 | 文件                          | 记录                                                                    |
 | ----------------------------- | ----------------------------------------------------------------------- |
-| `authelia/users_database.yml` | 用户名、argon2id 密码摘要、email、groups                                |
-| `authelia/configuration.yml`  | ACL subject `- "user:<name>"`                                           |
+| `authelia/users_database.yml` | 用户名、argon2id 密码摘要、email、`groups: [dsh]`（ACL 按此组授权）    |
 | `compose.yaml`                | `dsh-<name>` runtime 实例（挂载 `dsh-home/<name>`、`workspace/<name>`） |
-| `nginx/gateway.conf.template` | `upstream dsh_<name>` 与 `$dsh_user` → 后端的 map 条目                  |
+| `nginx/gateway/default.conf.template` | `upstream dsh_<name>` 与 `$dsh_user` → 后端的 map 条目                  |
 
-> `dsh-user` 是 `compose.yaml` 中第一个 runtime 服务，因此同时是 `AUTH_GATEWAY=false` 模式的单实例；新增实例总是追加在其后，不改变声明顺序。手工编辑这四处配置仍可，但必须自行保证一致（遗漏会导致 403 或后端不可达），推荐始终使用 Task 命令。
+> `dsh-user` 是 `compose.yaml` 中第一个 runtime 服务，因此同时是 `AUTH_GATEWAY=false` 模式的单实例；新增实例总是追加在其后，不改变声明顺序。手工编辑这三处配置仍可，但必须自行保证一致（遗漏 `dsh` 组或路由会导致 403/502），推荐始终使用 Task 命令。
 
 ## 架构与实现细节
 
@@ -459,7 +459,7 @@ runtime 网络同时承载 `dsh-http-entry` 别名解析：HTTP 入口服务与 
 - **跳错 HTTPS 端口**：把 `HTTPS_PORT` 设置为浏览器实际访问的公开端口，再重建认证块。
 - **404 unknown host**：访问 Host 与 `DSH_DOMAIN` 不一致，或外部终结器没有保留 Host。
 - **cookie/登录循环**：确认域名完全一致、证书入口是 HTTPS、浏览器未拦截 cookie；重启 Authelia 会使内存会话失效并要求重新登录。
-- **403**：用户缺少 ACL subject，或 gateway 未配置用户名到后端的映射。
+- **403**：用户的 groups 未含 `dsh`（ACL 按 `group:dsh` 授权），或 gateway 未配置用户名到后端的映射。
 - **切换模式后 HTTPS 短暂 502**：别名切换与 nginx 解析缓存（≤5s）叠加的预期窗口，稍候即恢复；持续 502 请检查当前入口块是否已启动。
 
 ### 网络和服务

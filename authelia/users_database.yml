@@ -1,15 +1,18 @@
 # =============================================================================
 # Authelia 文件用户库。仅 AUTH_GATEWAY=true 时使用。
-# 用户管理请使用 Task 命令（自动同步 ACL、compose 实例与 gateway 路由，
+# 用户管理请使用 Task 命令（自动同步 compose 实例与 gateway 路由，
 # 见 README「用户管理」）：
 #   task user:list
 #   task user:create -- <name> '<password>'
 #   task user:reset_password -- <name> '<new-password>'
 #   task user:remove -- <name>          # 删除配置，保留 dsh-home/<name> 与 workspace/<name>
-# 变更后应用：task auth:restart && task up
+# 变更自动热载：configuration.yml 开启了 watch: true，本文件一有变动 authelia 即在
+# 进程内重载（含 groups），无需重启、会话保留。
 #
 # 手工编辑本文件也可（每用户一个块：displayname/password/email/groups，
-# password 为 task hash 生成的 argon2id Digest），但需自行同步其余三处配置。
+# password 为 task hash 生成的 argon2id Digest），但需自行同步其余两处配置
+# （compose 实例、gateway 路由）。注意 groups 必须含 dsh —— ACL 规则按
+# "group:dsh" 授权，缺了该组的用户能登录门户但访问业务入口会得到 403。
 # =============================================================================
 
 users:
@@ -18,5 +21,4 @@ users:
     password: "$argon2id$v=19$m=65536,t=3,p=4$zI7p0/Hvs1WxJvzKl99gyQ$yXQgIf18t8mhPAO+SHwfZhJlPjrJBoXvoSlrPGsRgjA"
     email: user@harness.deepseek.com
     groups:
-      - user
-      - everyone
+      - dsh
