@@ -28,7 +28,7 @@ dotenv: ['.env']
 # container gets the current Compose model including the mode overlay's port/alias.
 # Restart never removes a container outside the selected blocks; switching the selection
 # itself still requires task up (restart does not run the entry-conflict cleanup).
-# up-family tasks (up/dsh:up/auth:up/tls:up/update) never pass --force-recreate: compose
+# up-family tasks (up/dsh:up/auth:up/tls:up/update/upgrade) never pass --force-recreate: compose
 # "up -d" convergence already recreates every service whose image ID or configuration
 # changed (a rebuilt dsh-runtime image is picked up automatically), so forced recreation
 # stays exclusive to the restart family.
@@ -522,6 +522,58 @@ tasks:
       - task: image:runner
       - task: _stack:reconcile
 
+  # ------------------------------------------------------------------- source update
+  # repo:update moves ONLY the source checkout to the latest published release;
+  # rebuilding images and reconciling the stack stays with update/upgrade.
+  #   - Releases are git tags (dsh-v*, version sort, pre-releases included): the
+  #     checkout's own origin is the single source of truth, no GitHub API/gh.
+  #   - The tag is checked out as a detached HEAD (the expected state for a
+  #     deployment checkout), which doubles as the rollback lever:
+  #       DSH_REF=dsh-v0.1.0-rc.7 task repo:update && task update
+  #   - Local modifications to tracked files abort the task (init's no-clobber
+  #     discipline). Untracked files (.pnpm-store, node_modules, build outputs)
+  #     never block a checkout unless the new tag tracks a file with the same
+  #     name - git refuses then and the hint below explains it. git clean is
+  #     deliberately never run: it would delete .pnpm-store.
+  #   - DSH_REF (.env or environment, env wins) overrides "latest tag" with any
+  #     rev, e.g. DSH_REF=master task repo:update tracks development instead.
+  #   - fetch failure (offline, wrong DSH_REPO_URL) aborts the task before any
+  #     checkout happens, so a failed upgrade never masquerades as success.
+  repo:update:
+    desc: Fetch origin and check out the latest published release tag (DSH_REF=<rev> to pin)
+    preconditions:
+      - sh: test -d '{{.REPO_DIR}}/.git'
+        msg: 'no DeepSeek Harness checkout; run task init (or task build) first'
+    cmds:
+      - |-
+        set -e
+        repo='{{.REPO_DIR}}'
+        if ! git -C "$repo" diff --quiet || ! git -C "$repo" diff --cached --quiet; then
+          echo 'error: deepseek-harness checkout has local modifications; commit or stash them first' >&2
+          git -C "$repo" status --short >&2 || true
+          exit 1
+        fi
+        git -C "$repo" fetch --tags --prune origin
+        ref="${DSH_REF:-{{ default "" .DSH_REF }}}"
+        if [ -z "$ref" ]; then
+          ref="$(git -C "$repo" tag --list 'dsh-v*' --sort=-v:refname | head -n 1)"
+        fi
+        if [ -z "$ref" ]; then
+          echo 'error: no dsh-v* release tag found after fetch; set DSH_REF or check DSH_REPO_URL' >&2
+          exit 1
+        fi
+        target="$(git -C "$repo" rev-parse --verify "$ref^{commit}")"
+        if [ "$(git -C "$repo" rev-parse HEAD)" = "$target" ]; then
+          echo "repo:update: already at $(git -C "$repo" describe --tags --always) - nothing to do"
+          exit 0
+        fi
+        before="$(git -C "$repo" describe --tags --always)"
+        if ! git -C "$repo" checkout --detach "$ref"; then
+          echo 'hint: the new release tracks a file that exists locally as untracked; move it away and retry' >&2
+          exit 1
+        fi
+        echo "repo:update: $before -> $(git -C "$repo" describe --tags --always)"
+
   # update is an up-family task and deliberately omits --force-recreate: plain "up -d"
   # convergence recreates exactly the services whose rebuilt image or changed config
   # requires it (a new dsh-runtime image ID triggers recreation), while untouched
@@ -534,6 +586,20 @@ tasks:
       - task: build
       - task: config:validate
       - task: _stack:reconcile
+
+  # upgrade is the one-command version update: repo:update (latest published
+  # release) followed by update's rebuild+reconcile. update itself deliberately
+  # stays git-free - HOST_UID/GID changes, local patches and plain config
+  # changes reuse it without silently moving the source version. CLI_ARGS keeps
+  # propagating, so "task upgrade -- --force-recreate" reaches the compose up
+  # calls exactly like "task update -- --force-recreate". If update fails after
+  # the checkout moved (e.g. build breakage), roll back with
+  # DSH_REF=<old-tag> task repo:update && task update.
+  upgrade:
+    desc: Check out the latest published release, rebuild, then reconcile the selected stack
+    cmds:
+      - task: repo:update
+      - task: update
 
   down:
     desc: Remove all runtime blocks and managed project resources; preserve host data

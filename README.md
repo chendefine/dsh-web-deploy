@@ -35,7 +35,7 @@
 - **本机 / 内网单人使用**（`AUTH_GATEWAY=false`）：零认证，一条命令起服务，`HTTP_PORT` 直接可访问；
 - **团队 / 多用户共享主机**（`AUTH_GATEWAY=true`）：Authelia SSO 统一登录，每个用户拥有独立的 DSH_HOME 与 workspace 实例，互不干扰；
 - **需要 HTTPS 的部署**：内置 TLS 终结器开箱即用（自签或自有证书），也可对接外部 Caddy / Traefik / nginx 终结器；
-- **追求低成本运维**：`task up` 是幂等收敛操作，`task update` 一条命令完成版本升级重建，数据全部落盘保留。
+- **追求低成本运维**：`task up` 是幂等收敛操作，`task upgrade` 一条命令完成版本升级（取最新发布 tag → 重建镜像 → 收敛栈），数据全部落盘保留。
 
 ## 快速开始
 
@@ -105,7 +105,7 @@ DSH_DOMAIN=dsh.localhost
 | 重启（强制重建）当前模式栈 | `task restart`                                                           |
 | 查看容器状态               | `task ps`                                                                |
 | 跟踪日志                   | `task logs`，或分块 `task dsh:logs` / `auth:logs` / `tls:logs`           |
-| 升级版本                   | `task update`                                                            |
+| 升级到最新发布版             | `task upgrade`（只取代码 `task repo:update`；只重建收敛 `task update`）  |
 | 进入实例 shell             | `task shell`（无认证模式进入第一个实例）；认证模式 `task shell -- user1` |
 | 校验配置                   | `task config:validate`                                                   |
 | 查看渲染后的 Compose 模型  | `task config:show`                                                       |
@@ -125,10 +125,24 @@ task up
 ### 升级版本
 
 ```bash
+task upgrade
+```
+
+一条命令完成升级：先把 `deepseek-harness/` 检出推进到上游**最新发布 tag**（`dsh-v*` 按版本序取最高，含 rc 预发布），再执行 `task update` 同款流程（重建源码产物与镜像 → 收敛当前目标模式）。
+
+取代码与重建两个环节拆成两个任务，可单独使用：
+
+- `task repo:update`：只更新源码检出。`git fetch --tags` 后取最新 `dsh-v*` tag 并 `git checkout --detach`；已在目标 tag 上则为 no-op。tracked 文件有本地修改时直接报错退出，不覆盖现场；untracked 文件（`.pnpm-store`、`node_modules`、构建产物）不受影响，也绝不执行 `git clean`。网络失败（离线、`DSH_REPO_URL` 不可达）会在 checkout 前中止，不会出现"以为升级了其实没升"。
+- `task update`：只重建与收敛，**不做任何 git 操作**，源码停留在当前检出。`HOST_UID`/`HOST_GID` 调整、本地补丁或配置变更后的重建直接用它，不会被隐式升级。
+
+`DSH_REF`（环境变量或 `.env`，环境变量优先）可锁定任意目标版本：tag、分支或 commit，例如 `DSH_REF=master task repo:update` 跟踪开发分支，或用于回滚：
+
+```bash
+DSH_REF=dsh-v0.1.0-rc.7 task repo:update   # 也可直接 git -C deepseek-harness checkout dsh-v0.1.0-rc.7
 task update
 ```
 
-重建源码产物和镜像，再以 `task up` 同款的收敛方式更新当前目标模式：只有镜像或配置发生变化的服务会被重建（重建后的 runtime 镜像会被自动采用），未变化的服务（如 authelia/gateway）保持运行、Authelia 会话不受影响（`HTTPS_EXPORT=false` 时不启动也不移除已有 TLS 容器，仅对运行中的容器做 best-effort reload）。挂载的数据目录不会被删除。需要强制重建全部所选容器时使用 `task restart`，或 `task update -- --force-recreate` 显式传入。
+升级动作本身以收敛方式执行：只有镜像或配置发生变化的服务会被重建（重建后的 runtime 镜像会被自动采用），未变化的服务（如 authelia/gateway）保持运行、Authelia 会话不受影响（`HTTPS_EXPORT=false` 时不启动也不移除已有 TLS 容器，仅对运行中的容器做 best-effort reload）。挂载的数据目录不会被删除。需要强制重建全部所选容器时使用 `task restart`，或 `task upgrade -- --force-recreate` 显式传入。若 checkout 已前移但 `update` 阶段失败（如构建报错），用上面的 `DSH_REF` 回滚方式恢复旧版本。
 
 ### 多用户基本操作（认证模式）
 
@@ -149,7 +163,9 @@ task user:list                              # 查看用户列表
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `task up`                                     | 收敛并启动两个开关选中的完整模式                                                                                                                                                                                                |
 | `task down`                                   | 清除 dsh/auth/tls 的全部运行容器及项目资源，保留挂载数据                                                                                                                                                                        |
-| `task update`                                 | 重建源码产物和镜像，再以收敛方式更新当前目标模式（仅重建镜像/配置变化的服务，未变化的服务保持运行；需强制重建用 `task restart` 或 `task update -- --force-recreate`；`HTTPS_EXPORT=false` 时不启动也不移除已有 TLS 容器，仅对运行中的容器做 best-effort reload）                |
+| `task upgrade`                                | 升级到最新发布版：`repo:update`（取最新 `dsh-v*` tag，含 rc；`DSH_REF` 可锁定版本）+ `update` 全流程；compose 参数透传同 `task update`                                                              |
+| `task repo:update`                            | 只把 `deepseek-harness/` 检出更新到最新发布 tag（detached HEAD；已在目标 tag 上则 no-op）；tracked 文件有本地修改时拒绝执行；`DSH_REF=<tag/分支/commit>` 覆盖目标；不做任何构建与 docker 操作                |
+| `task update`                                 | **不做 git 操作**，源码停留在当前检出；重建源码产物和镜像，再以收敛方式更新当前目标模式（仅重建镜像/配置变化的服务，未变化的服务保持运行；需强制重建用 `task restart` 或 `task update -- --force-recreate`；`HTTPS_EXPORT=false` 时不启动也不移除已有 TLS 容器，仅对运行中的容器做 best-effort reload）                |
 | `task build`                                  | 构建 builder/runtime 镜像和源码产物，不启动运行服务                                                                                                                                                                             |
 | `task config:validate`                        | 校验布尔值、端口、合并模型不变量，并输出所选模式与 HTTP 入口                                                                                                                                                                    |
 | `task config:show`                            | 展示当前模式渲染后的 Compose 模型                                                                                                                                                                                               |
@@ -217,6 +233,7 @@ task dsh:restart -- user1             # 只强制重建 user1 的实例
 | `BUILDER_NETWORK` / `RUN_NETWORK` | 空                     | 设置即加入已存在的 external 网络；详见 [网络](#网络)                                               |
 | `DEEPSEEK_API_KEY`                | 空                     | 所有 dsh 实例共享、只读且优先于 UI 的 API key；需要用户级隔离请勿设置                              |
 | `DSH_REPO_URL`                    | GitHub 官方仓库        | `task init` 克隆源码的地址                                                                         |
+| `DSH_REF`                         | 空（最新发布 tag）     | `task repo:update` / `task upgrade` 的目标版本；空 = 最新 `dsh-v*` tag（含 rc），可填 tag/分支/commit 锁定或回滚；环境变量优先于 `.env` |
 | `GATEWAY_PORT`                    | 已弃用                 | 仅为旧 `.env` 保留兼容回退；新配置请改用 `HTTP_PORT`                                               |
 
 ### HTTP_PORT
