@@ -67,6 +67,17 @@ for p in node_modules/.bin/tsx apps/cli/src/bin.ts apps/web/dist/index.html; do
   fi
 done
 
+# --- 容器内dsh命令: /usr/local/bin/dsh ---------------------------
+cat > /usr/local/bin/dsh << 'EOF'
+#!/usr/bin/env bash
+# dsh CLI wrapper — runs the /app/dsh checkout CLI
+
+cd /app/dsh
+
+exec /app/dsh/node_modules/.bin/tsx /app/dsh/apps/cli/src/bin.ts "$@"
+EOF
+chmod 0755 /usr/local/bin/dsh
+
 # --- 容器内自重启命令: /usr/local/bin/reboot ---------------------------
 # 每次启动重写, 内容固定故幂等。compose 给每个实例 stamp 了 `restart:
 # unless-stopped`: PID 1 退出的瞬间, daemon 就把同一个容器对象(端口/挂载/

@@ -103,8 +103,6 @@ RUN groupadd --gid "${HOST_GID}" dsh \
 # ---------------------------------------------------------------------------
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-COPY dsh /usr/local/bin/dsh
-RUN chmod +x /usr/local/bin/dsh
 
 # ---------------------------------------------------------------------------
 # 8. git safe.directory 烧进系统配置(/etc/gitconfig), 构建期写定、运行期不再

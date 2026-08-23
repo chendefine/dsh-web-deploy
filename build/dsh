@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-# dsh CLI wrapper — runs the /app/dsh checkout CLI
-exec /app/dsh/node_modules/.bin/tsx /app/dsh/apps/cli/src/bin.ts "$@"
