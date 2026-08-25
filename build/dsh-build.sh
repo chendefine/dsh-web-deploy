@@ -18,11 +18,22 @@ if [ "$(stat -c '%u' .)" != "$(id -u)" ] || [ "$(stat -c '%g' .)" != "$(id -g)" 
   exit 1
 fi
 
-echo "[builder] running as $(id -u):$(id -g); node $(node --version), pnpm $(pnpm --version), store ${npm_config_store_dir}"
+# pnpm 包存储位置, 显式传给 pnpm。不用环境变量: pnpm 11 不识别
+# npm_config_store_dir(下划线)写法, 曾因此静默回落到默认的
+# $HOME/.local/share/pnpm, 又因当时 HOME=检出根, 1.4GB 的 .local/ 漏进了仓库。
+# /app/dsh/.pnpm-store 随 bind mount 持久化到宿主机 deepseek-harness/.pnpm-store
+# (repo 的 .gitignore 已忽略), 与 node_modules 同文件系统, 保持硬链接安装。
+STORE_DIR=/app/dsh/.pnpm-store
+
+# HOME 由 Dockerfile.builder 指向易失临时目录; 确保 pnpm 有可写的 home。
+mkdir -p "${HOME}"
+
+echo "[builder] running as $(id -u):$(id -g); node $(node --version), pnpm $(pnpm --version)"
+echo "[builder] store: ${STORE_DIR} (pnpm resolves: $(pnpm store path --store-dir "${STORE_DIR}"))"
 
 # CI=true 跳过 lefthook postinstall(此副本不需要 git hook); node_modules 已最新
 # 时就是一次快速的空验证。
-CI=true pnpm install --frozen-lockfile
+CI=true pnpm install --frozen-lockfile --store-dir "${STORE_DIR}"
 
 # 库(tsc + tsdown)与 web 前端(vite)。'dsh web' 服务 apps/web/dist,
 # 必须先于 runtime 容器跑。
