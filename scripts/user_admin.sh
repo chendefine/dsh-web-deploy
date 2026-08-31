@@ -263,6 +263,7 @@ cmd_create() {
       print "    container_name: dsh-web-" name
       print "    volumes:"
       print "      - *dsh-checkout"
+      print "      - *dsh-noauth-override"
       print "      - ./dsh-home/" name ":/data/dsh-home"
       print "      - ./workspace/" name ":/data/workspace"
       print ""

@@ -49,6 +49,9 @@ x-dsh-runtime: &dsh-runtime
     DSH_GID: ${HOST_GID:-1000}
   volumes:
     - &dsh-checkout ./deepseek-harness:/app/dsh:ro
+    # dsh 以 tsx 从源码启动(apps/cli/src/bin.ts, tsconfig paths 把 workspace 包
+    # 指向 src/), 服务端浏览器认证读的是 src/browser-auth.ts 而非编译产物 lib/。
+    - &dsh-noauth-override ./overrides/browser-auth.ts:/app/dsh/packages/client/connection/src/browser-auth.ts:ro
   networks:
     - runtime
 
@@ -149,6 +152,7 @@ services:
     container_name: dsh-web-user
     volumes:
       - *dsh-checkout
+      - *dsh-noauth-override
       - ./dsh-home/user:/data/dsh-home
       - ./workspace/user:/data/workspace
 
@@ -174,6 +178,7 @@ services:
     volumes:
       - ./deepseek-harness:/app/dsh
       - ./overrides/loopback-hostname.ts:/app/dsh/packages/client/connection/src/loopback-hostname.ts:ro
+      - ./overrides/browser-auth.ts:/app/dsh/packages/client/connection/src/browser-auth.ts:ro
     networks:
       - builder
 

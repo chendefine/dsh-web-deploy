@@ -5,6 +5,7 @@
 .env
 
 deepseek-harness
+vscode-server
 
 # Persistent runtime data
 dsh-home/
